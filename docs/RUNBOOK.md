@@ -289,31 +289,46 @@ docker exec tulip-suricata suricatasc -c reload-rules
 ```
 Setup_tool/
 ├── services.json              ← EDIT THIS (single source of truth)
-├── SCHEMA.md                  ← Field documentation
-├── validate-config.sh         ← Config validator
-├── bringup.sh                 ← One-command start
+├── docker-compose.yml         ← Monitor hub services
+├── bringup.sh                 ← One-command start (generators → services)
 ├── teardown.sh                ← Graceful stop
+├── validate-config.sh         ← Config validator (incl. keyword drift check)
 ├── pull-and-save.sh           ← Build offline bundle
 ├── offline-restore.sh         ← Restore on air-gapped machine
-├── docker-compose.yml         ← Hub services
-├── traffic/                   ← Pcap files (Tulip reads here)
-├── vault/                     ← Documents for AnythingLLM RAG
-├── detection/                 ← Flag-out + honeytoken service
-├── ml-fingerprint/            ← L3/L4 bot fingerprinter
+│
+├── docs/                      ← Everything besides this file
+│   ├── SCHEMA.md              ← services.json field reference
+│   ├── ARCHITECTURE.md        ← How the system works, data-flow first
+│   ├── RUNBOOK.md             ← This file
+│   ├── STATUS.md              ← What's actually verified to work, with evidence
+│   └── DEMO.md                ← Live-presentation script (pre-flight checks, fallbacks)
+│
+├── generators/                ← Emit each tool's native config from services.json
+│   ├── gen-tulip-env.py       ← → offline-bundle/repos/tulip/.env
+│   └── gen-ctfproxy.py        ← → offline-bundle/repos/ctf_proxy/proxy/config/config.json
+│
+├── detection/                 ← Flag-out regex scanner + honeytoken + Suricata ingester
+├── ml-fingerprint/            ← L3/L4 bot fingerprinter (DBSCAN)
 ├── watchdog/                  ← SLA poller
-├── ioc-brain/                 ← Load-on-demand LLM API
+├── ioc-brain/                 ← Load-on-demand LLM API (reads flows via mcp-tulip)
+├── mcp-tulip/                 ← MCP server: read-only Postgres access to Tulip's flow DB
+├── mock-vulnbox/              ← Toy vulnerable services for single-machine testing
 ├── dashboard/                 ← Unified monitoring UI
-├── generators/                   ← Helper scripts
-│   └── gen-tulip-env.py       ← Generates Tulip .env from services.json
-├── vulnbox-deploy/            ← Deploy scripts (NOT auto-run)
+│
+├── suricata/lib/rules/        ← Suricata ruleset (starter — swap in a real feed before competition)
+├── traffic/                   ← Pcap files (Tulip + detection both watch this dir)
+├── vault/                     ← Documents for AnythingLLM RAG (currently empty)
+│
+├── vulnbox-deploy/            ← Deploy scripts for a REAL vulnbox (NOT auto-run)
 │   ├── deploy-capture.sh
 │   ├── deploy-os-watchdog.sh
 │   ├── deploy-honeytoken.sh
 │   └── os-watchdog-agent.sh
-└── offline-bundle/            ← Everything needed for air-gap restore
+│
+└── offline-bundle/            ← Build artifact (gitignored — run pull-and-save.sh to create)
     ├── images/                ← Docker .tar archives
     ├── wheels/                ← Python .whl files
-    ├── repos/tulip/           ← Tulip source
+    ├── repos/                 ← Cloned upstream: tulip, ctf_proxy, pcap-broker
     ├── ollama-models/         ← LLM + embedding model blobs
     └── services.json          ← Config snapshot
 ```
