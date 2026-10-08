@@ -62,12 +62,13 @@
     "note": "postgres_host_port is Tulip's timescale container, exposed to host so mcp-tulip (on ctf-net) can reach it; bringup.sh builds the full URI using the same DOCKER_HOST_GATEWAY resolution as ioc-brain's Ollama access"
   },
   "ollama": {
+    "host": "",
     "port": 11434,
     "llm_model": "foundation-sec-8b-chat",
     "llm_base_model": "hf.co/Mungert/Foundation-Sec-8B-GGUF:Q4_K_M",
     "embed_model": "nomic-embed-text",
     "gpu_layers": 20,
-    "note": "load on demand only; never keep resident. gpu_layers=20 fits ~2.5GB VRAM for Q4_K_M 8B"
+    "note": "load on demand only; never keep resident. gpu_layers=20 fits ~2.5GB VRAM for Q4_K_M 8B. host: empty = Ollama runs on this same machine (bringup.sh auto-probes a reachable gateway); set to a real LAN IP (e.g. 192.168.1.50) to point at a dedicated LLM machine instead — see docs/REMOTE_LLM.md"
   },
   "anythingllm": {
     "port": 3001

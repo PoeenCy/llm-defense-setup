@@ -60,6 +60,7 @@ HONEYTOKEN_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d
 TEAMS_CIDR=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['teams_cidr'])")
 TULIP_WEB_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['tulip']['web_port'])")
 OLLAMA_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['port'])")
+OLLAMA_HOST_CFG=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama'].get('host',''))")
 LLM_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['llm_model'])")
 EMBED_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['embed_model'])")
 GPU_LAYERS=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['gpu_layers'])")
@@ -171,20 +172,34 @@ log "Starting core services (redis, detection, watchdog, dashboard)..."
 docker compose up -d mock-vulnbox redis
 sleep 3  # wait for redis; this also creates the ctf-net network
 
+# Tulip's Postgres always stays on THIS machine — probe for it using its own
+# port (5433), regardless of where Ollama ends up (see below). This also
+# supplies the fallback gateway for Ollama when ollama.host isn't set.
 if [[ "$PODMAN_BACKED" == true && -z "${DOCKER_HOST_GATEWAY:-}" ]]; then
     log "Probing bridge gateways for one that actually routes to the host..."
     CANDIDATES="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null) 172.17.0.1 10.88.0.1"
     for GW in $CANDIDATES; do
         [[ -z "$GW" ]] && continue
-        if docker run --rm --network ctf-net busybox sh -c "nc -z -w2 $GW $OLLAMA_PORT" &>/dev/null; then
+        if docker run --rm --network ctf-net busybox sh -c "nc -z -w2 $GW $MCP_PG_PORT" &>/dev/null; then
             warn "Using bridge gateway: $GW (set DOCKER_HOST_GATEWAY to override next time)"
             export DOCKER_HOST_GATEWAY="$GW"
             break
         fi
     done
-    [[ -z "${DOCKER_HOST_GATEWAY:-}" ]] && warn "No working bridge gateway found — ollama/mcp-tulip may be unreachable"
+    [[ -z "${DOCKER_HOST_GATEWAY:-}" ]] && warn "No working bridge gateway found — mcp-tulip may be unreachable"
 fi
 export MCP_POSTGRES_RO_URI="postgresql://${MCP_PG_ROLE}@${DOCKER_HOST_GATEWAY:-host.docker.internal}:${MCP_PG_PORT}/${MCP_PG_DB}"
+
+# Ollama: if services.json's ollama.host is set, it's on a DEDICATED machine
+# (see docs/REMOTE_LLM.md) — use that LAN IP directly, no podman gateway
+# weirdness applies since it's a normal network hop, not host-NAT hairpin.
+# Otherwise it's on this same machine, reachable via the gateway above.
+if [[ -n "$OLLAMA_HOST_CFG" ]]; then
+    log "Ollama configured on a remote host: $OLLAMA_HOST_CFG"
+    export OLLAMA_RESOLVED_HOST="$OLLAMA_HOST_CFG"
+else
+    export OLLAMA_RESOLVED_HOST="${DOCKER_HOST_GATEWAY:-host.docker.internal}"
+fi
 
 docker compose up -d detection watchdog ml-fingerprint mcp-tulip
 sleep 2

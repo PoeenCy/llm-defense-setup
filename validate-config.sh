@@ -162,6 +162,12 @@ for dotted in ["mcp.postgres_role", "mcp.postgres_db", "mcp.postgres_host_port",
         ok(f"{dotted} = {v}")
 
 # ---- ollama ----
+host_v, host_found = get(d, "ollama", "host")
+if host_found and host_v:
+    ok(f"ollama.host = {host_v} (remote LLM machine — see docs/REMOTE_LLM.md)")
+else:
+    ok("ollama.host = (empty — Ollama runs on this machine)")
+
 for dotted in ["ollama.port", "ollama.llm_model", "ollama.embed_model", "ollama.gpu_layers"]:
     keys = dotted.split(".")
     v, found = get(d, *keys)

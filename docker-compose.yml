@@ -151,7 +151,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - MCP_URL=http://mcp-tulip:8765/mcp
-      - OLLAMA_HOST=http://${DOCKER_HOST_GATEWAY:-host.docker.internal}:${OLLAMA_PORT:-11434}
+      - OLLAMA_HOST=http://${OLLAMA_RESOLVED_HOST:-host.docker.internal}:${OLLAMA_PORT:-11434}
       - LLM_MODEL=${LLM_MODEL}
       - EMBED_MODEL=${EMBED_MODEL}
       - GPU_LAYERS=${GPU_LAYERS:-20}
@@ -209,11 +209,11 @@ services:
       - STORAGE_DIR=/app/server/storage
       - JWT_SECRET=ctf-monitor-secret-change-me
       - LLM_PROVIDER=ollama
-      - OLLAMA_BASE_PATH=http://${DOCKER_HOST_GATEWAY:-host.docker.internal}:${OLLAMA_PORT:-11434}
+      - OLLAMA_BASE_PATH=http://${OLLAMA_RESOLVED_HOST:-host.docker.internal}:${OLLAMA_PORT:-11434}
       - OLLAMA_MODEL_PREF=${LLM_MODEL}
       - OLLAMA_EMBEDDING_MODEL_PREF=${EMBED_MODEL}
       - EMBEDDING_ENGINE=ollama
-      - EMBEDDING_BASE_PATH=http://${DOCKER_HOST_GATEWAY:-host.docker.internal}:${OLLAMA_PORT:-11434}
+      - EMBEDDING_BASE_PATH=http://${OLLAMA_RESOLVED_HOST:-host.docker.internal}:${OLLAMA_PORT:-11434}
     volumes:
       - anythingllm-storage:/app/server/storage
       - ./vault:/vault:ro
