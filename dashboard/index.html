@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTF Monitor Hub — Situational Awareness Dashboard</title>
+  <meta name="description" content="Real-time Attack-Defense CTF monitoring dashboard: flag-out detection, bot fingerprinting, SLA watchdog, IOC analysis.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* ═══════════════════════════════════════════════════════════
+       CTF Monitor Hub — Design System
+    ═══════════════════════════════════════════════════════════ */
+    :root {
+      --bg-base:        #080b10;
+      --bg-panel:       #0d1117;
+      --bg-card:        #111827;
+      --bg-card-hover:  #162032;
+      --border:         #1e2d40;
+      --border-bright:  #2a3d55;
+      --accent-cyan:    #00d4ff;
+      --accent-blue:    #3b82f6;
+      --accent-purple:  #a855f7;
+      --accent-green:   #22c55e;
+      --accent-yellow:  #f59e0b;
+      --accent-orange:  #f97316;
+      --accent-red:     #ef4444;
+      --text-primary:   #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-dim:       #4b5563;
+      --glow-red:       0 0 20px rgba(239,68,68,0.4);
+      --glow-cyan:      0 0 20px rgba(0,212,255,0.3);
+      --glow-green:     0 0 20px rgba(34,197,94,0.3);
+      --glow-yellow:    0 0 20px rgba(245,158,11,0.3);
+      --font-mono:      'JetBrains Mono', monospace;
+      --font-sans:      'Inter', sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg-base);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* Scanline overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,212,255,0.012) 2px,
+        rgba(0,212,255,0.012) 4px
+      );
+      pointer-events: none;
+      z-index: 999;
+    }
+
+    /* ─── Header ───────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 24px;
+      background: linear-gradient(135deg, #0d1117 0%, #0a1628 100%);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(10px);
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .logo-mark {
+      width: 38px;
+      height: 38px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      box-shadow: var(--glow-cyan);
+      animation: pulse-logo 3s ease-in-out infinite;
+    }
+
+    @keyframes pulse-logo {
+      0%, 100% { box-shadow: 0 0 12px rgba(0,212,255,0.3); }
+      50%       { box-shadow: 0 0 30px rgba(0,212,255,0.7); }
+    }
+
+    .header-title h1 {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: var(--text-primary);
+    }
+    .header-title span {
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .conn-status {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
+    }
+    .conn-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent-red);
+      transition: background 0.3s;
+    }
+    .conn-dot.connected { background: var(--accent-green); box-shadow: var(--glow-green); animation: blink 2s infinite; }
+    @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+
+    .clock {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: var(--accent-cyan);
+      letter-spacing: 0.08em;
+    }
+
+    .tulip-btn {
+      padding: 6px 14px;
+      background: linear-gradient(135deg, #1e3a5f, #0a2040);
+      border: 1px solid var(--accent-blue);
+      border-radius: 6px;
+      color: var(--accent-blue);
+      text-decoration: none;
+      font-size: 12px;
+      font-family: var(--font-mono);
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .tulip-btn:hover { background: var(--accent-blue); color: white; box-shadow: 0 0 15px rgba(59,130,246,0.4); }
+
+    /* ─── Stats Bar ─────────────────────────────────────────── */
+    .stats-bar {
+      display: flex;
+      gap: 1px;
+      background: var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .stat-tile {
+      flex: 1;
+      padding: 12px 20px;
+      background: var(--bg-panel);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      transition: background 0.2s;
+    }
+    .stat-tile:hover { background: var(--bg-card); }
+    .stat-icon { font-size: 20px; }
+    .stat-info { display: flex; flex-direction: column; }
+    .stat-value {
+      font-size: 22px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      line-height: 1;
+    }
+    .stat-label { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.1em; margin-top: 2px; }
+
+    .stat-tile.critical .stat-value { color: var(--accent-red); text-shadow: var(--glow-red); }
+    .stat-tile.high     .stat-value { color: var(--accent-orange); }
+    .stat-tile.hint     .stat-value { color: var(--accent-yellow); }
+    .stat-tile.info     .stat-value { color: var(--accent-cyan); }
+    .stat-tile.green    .stat-value { color: var(--accent-green); }
+
+    /* ─── Main Layout ───────────────────────────────────────── */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      grid-template-rows: auto auto;
+      gap: 1px;
+      background: var(--border);
+      min-height: calc(100vh - 110px);
+    }
+
+    /* ─── Panel base ────────────────────────────────────────── */
+    .panel {
+      background: var(--bg-panel);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(90deg, var(--bg-card) 0%, transparent 100%);
+    }
+    .panel-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-secondary);
+    }
+    .panel-badge {
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+    .badge-red    { background: rgba(239,68,68,0.15);   color: var(--accent-red);    border: 1px solid rgba(239,68,68,0.3); }
+    .badge-cyan   { background: rgba(0,212,255,0.1);    color: var(--accent-cyan);   border: 1px solid rgba(0,212,255,0.25); }
+    .badge-yellow { background: rgba(245,158,11,0.1);   color: var(--accent-yellow); border: 1px solid rgba(245,158,11,0.25); }
+    .badge-green  { background: rgba(34,197,94,0.1);    color: var(--accent-green);  border: 1px solid rgba(34,197,94,0.25); }
+    .badge-purple { background: rgba(168,85,247,0.1);   color: var(--accent-purple); border: 1px solid rgba(168,85,247,0.25); }
+
+    /* ─── Alert Feed ─────────────────────────────────────────── */
+    #alert-panel {
+      grid-column: 1;
+      grid-row: 1 / 3;
+    }
+
+    .alert-list {
+      overflow-y: auto;
+      flex: 1;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .alert-list::-webkit-scrollbar { width: 4px; }
+    .alert-list::-webkit-scrollbar-track { background: transparent; }
+    .alert-list::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+    .alert-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      animation: slideIn 0.3s ease-out;
+      position: relative;
+      overflow: hidden;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateX(-10px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    .alert-card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .alert-card:hover { border-color: var(--border-bright); background: var(--bg-card-hover); }
+    .alert-card:hover::before { opacity: 0.03; }
+
+    /* Priority colors */
+    .alert-card.prio-critical  { border-left-color: var(--accent-red); }
+    .alert-card.prio-critical::before { background: var(--accent-red); }
+    .alert-card.prio-high      { border-left-color: var(--accent-orange); }
+    .alert-card.prio-medium    { border-left-color: var(--accent-yellow); }
+    .alert-card.prio-low       { border-left-color: var(--accent-blue); }
+    .alert-card.prio-info      { border-left-color: var(--accent-green); }
+    .alert-card.prio-hint      { border-left-color: var(--accent-purple); }
+
+    /* Flash animation for new critical alerts */
+    @keyframes flashRed {
+      0%, 100% { box-shadow: none; }
+      25%, 75% { box-shadow: 0 0 20px rgba(239,68,68,0.5), inset 0 0 20px rgba(239,68,68,0.05); }
+    }
+    .alert-card.new-critical { animation: slideIn 0.3s ease-out, flashRed 1s ease-in-out 0.3s 2; }
+
+    .alert-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 5px;
+    }
+    .alert-type-badge {
+      font-size: 9px;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .type-flag-out    { background: rgba(239,68,68,0.2);   color: #ff6b6b; border: 1px solid rgba(239,68,68,0.4); }
+    .type-honeytoken  { background: rgba(239,68,68,0.25);  color: #ff4444; border: 1px solid rgba(239,68,68,0.5); }
+    .type-suricata    { background: rgba(249,115,22,0.2);  color: #fb923c; border: 1px solid rgba(249,115,22,0.4); }
+    .type-sla-down    { background: rgba(239,68,68,0.2);   color: #f87171; border: 1px solid rgba(239,68,68,0.35); }
+    .type-sla-slow    { background: rgba(245,158,11,0.2);  color: #fbbf24; border: 1px solid rgba(245,158,11,0.4); }
+    .type-sla-restored{ background: rgba(34,197,94,0.15);  color: #4ade80; border: 1px solid rgba(34,197,94,0.3); }
+    .type-bot-hint    { background: rgba(168,85,247,0.15); color: #c084fc; border: 1px solid rgba(168,85,247,0.3); }
+    .type-ioc         { background: rgba(0,212,255,0.1);   color: #67e8f9; border: 1px solid rgba(0,212,255,0.3); }
+    .type-default     { background: rgba(148,163,184,0.1); color: #94a3b8; border: 1px solid rgba(148,163,184,0.2); }
+
+    .alert-message {
+      font-size: 13px;
+      line-height: 1.4;
+      color: var(--text-primary);
+      flex: 1;
+      word-break: break-word;
+    }
+
+    .alert-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 6px;
+    }
+    .alert-meta span {
+      font-size: 10px;
+      font-family: var(--font-mono);
+      color: var(--text-dim);
+    }
+    .alert-meta .ip {
+      color: var(--text-secondary);
+      background: rgba(255,255,255,0.05);
+      padding: 1px 5px;
+      border-radius: 3px;
+    }
+    .alert-meta .conf-HIGH    { color: var(--accent-red); }
+    .alert-meta .conf-MEDIUM  { color: var(--accent-yellow); }
+    .alert-meta .conf-LOW     { color: var(--accent-purple); }
+    .alert-meta .conf-INFO    { color: var(--accent-green); }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 60px;
+      color: var(--text-dim);
+      text-align: center;
+    }
+    .empty-state .icon { font-size: 40px; opacity: 0.4; }
+    .empty-state p { font-size: 13px; line-height: 1.5; }
+
+    /* ─── Right Column ───────────────────────────────────────── */
+    .right-col {
+      grid-column: 2;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      background: var(--border);
+    }
+
+    /* ─── Watchdog Panel ─────────────────────────────────────── */
+    #watchdog-panel {
+      background: var(--bg-panel);
+      flex-shrink: 0;
+    }
+
+    .service-list { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+
+    .service-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      transition: all 0.3s;
+    }
+    .service-indicator {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: all 0.3s;
+    }
+    .service-indicator.up       { background: var(--accent-green); box-shadow: 0 0 8px rgba(34,197,94,0.6); animation: blink 2s infinite; }
+    .service-indicator.down     { background: var(--accent-red);   box-shadow: 0 0 12px rgba(239,68,68,0.8); animation: pulseRed 1s infinite; }
+    .service-indicator.slow     { background: var(--accent-yellow); box-shadow: 0 0 8px rgba(245,158,11,0.5); }
+    .service-indicator.unknown  { background: var(--text-dim); }
+
+    @keyframes pulseRed {
+      0%, 100% { box-shadow: 0 0 8px rgba(239,68,68,0.5); }
+      50%      { box-shadow: 0 0 20px rgba(239,68,68,1.0); }
+    }
+
+    .service-name { font-size: 12px; font-family: var(--font-mono); flex: 1; color: var(--text-primary); }
+    .service-port { font-size: 10px; color: var(--text-dim); }
+    .service-latency { font-size: 10px; font-family: var(--font-mono); color: var(--text-secondary); text-align: right; }
+
+    /* ─── ML Hints Panel ─────────────────────────────────────── */
+    #hints-panel { background: var(--bg-panel); flex: 1; display: flex; flex-direction: column; }
+
+    .hint-list { overflow-y: auto; flex: 1; padding: 8px; display: flex; flex-direction: column; gap: 5px; }
+    .hint-list::-webkit-scrollbar { width: 4px; }
+    .hint-list::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+    .hint-card {
+      background: rgba(168,85,247,0.05);
+      border: 1px solid rgba(168,85,247,0.2);
+      border-radius: 5px;
+      padding: 8px 10px;
+      animation: slideIn 0.3s ease-out;
+    }
+    .hint-card:hover { background: rgba(168,85,247,0.1); }
+
+    .hint-label { font-size: 9px; font-family: var(--font-mono); color: var(--accent-purple); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 3px; }
+    .hint-msg   { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
+    .hint-meta  { font-size: 9px; font-family: var(--font-mono); color: var(--text-dim); margin-top: 4px; }
+
+    /* ─── IOC Quick View ─────────────────────────────────────── */
+    #ioc-panel { background: var(--bg-panel); flex-shrink: 0; }
+
+    .ioc-analyze-form {
+      padding: 10px;
+      display: flex;
+      gap: 6px;
+    }
+    .ioc-input {
+      flex: 1;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 7px 10px;
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .ioc-input:focus { border-color: var(--accent-cyan); }
+    .ioc-input::placeholder { color: var(--text-dim); }
+
+    .ioc-btn {
+      padding: 7px 14px;
+      background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(59,130,246,0.15));
+      border: 1px solid var(--accent-cyan);
+      border-radius: 5px;
+      color: var(--accent-cyan);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .ioc-btn:hover { background: var(--accent-cyan); color: black; }
+    .ioc-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .ioc-result {
+      margin: 0 10px 10px;
+      padding: 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      font-size: 11px;
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
+      max-height: 200px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      display: none;
+    }
+    .ioc-result.visible { display: block; }
+    .ioc-result::-webkit-scrollbar { width: 3px; }
+    .ioc-result::-webkit-scrollbar-thumb { background: var(--border-bright); }
+
+    /* ─── Priority legend ───────────────────────────────────── */
+    .priority-legend {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 16px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .legend-item { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-dim); }
+    .legend-dot  { width: 6px; height: 6px; border-radius: 50%; }
+
+    /* ─── Filter bar ────────────────────────────────────────── */
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-panel);
+      flex-wrap: wrap;
+    }
+    .filter-label { font-size: 10px; color: var(--text-dim); font-family: var(--font-mono); }
+    .filter-btn {
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      transition: all 0.15s;
+    }
+    .filter-btn:hover  { border-color: var(--border-bright); color: var(--text-secondary); }
+    .filter-btn.active { background: var(--accent-cyan); border-color: var(--accent-cyan); color: black; font-weight: 700; }
+
+    /* ─── Footer status ─────────────────────────────────────── */
+    footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 16px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border);
+      font-size: 10px;
+      font-family: var(--font-mono);
+      color: var(--text-dim);
+    }
+    footer span { display: flex; align-items: center; gap: 6px; }
+
+    /* ─── Modal (IOC detail) ────────────────────────────────── */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(4px);
+      z-index: 200;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--bg-card);
+      border: 1px solid var(--border-bright);
+      border-radius: 10px;
+      max-width: 700px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+      padding: 20px;
+      box-shadow: 0 0 60px rgba(0,0,0,0.8);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .modal-title { font-size: 14px; font-weight: 600; }
+    .modal-close { cursor: pointer; color: var(--text-dim); font-size: 18px; line-height: 1; }
+    .modal-close:hover { color: var(--text-primary); }
+    .modal-body { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+
+    /* ─── Toast notifications ───────────────────────────────── */
+    #toast-container {
+      position: fixed;
+      top: 70px;
+      right: 20px;
+      z-index: 300;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+    }
+    .toast {
+      padding: 10px 16px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+      border: 1px solid;
+      backdrop-filter: blur(10px);
+      animation: toastIn 0.3s ease-out, toastOut 0.3s ease-in 2.7s forwards;
+      max-width: 350px;
+    }
+    @keyframes toastIn  { from { opacity:0; transform: translateX(20px); } to { opacity:1; transform: translateX(0); } }
+    @keyframes toastOut { from { opacity:1; } to { opacity:0; } }
+    .toast.critical { background: rgba(239,68,68,0.15); border-color: rgba(239,68,68,0.5); color: #ff6b6b; }
+    .toast.info     { background: rgba(0,212,255,0.1);  border-color: rgba(0,212,255,0.3); color: var(--accent-cyan); }
+    .toast.success  { background: rgba(34,197,94,0.1);  border-color: rgba(34,197,94,0.3); color: var(--accent-green); }
+
+    /* ─── Scrollbar global ──────────────────────────────────── */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 3px; }
+
+    /* ─── Responsive ────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .main-grid { grid-template-columns: 1fr; grid-template-rows: auto; }
+      .right-col { grid-column: 1; }
+      #alert-panel { grid-row: auto; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ───────────────────────────────────────────────── -->
+<header>
+  <div class="header-left">
+    <div class="logo-mark">🛡</div>
+    <div class="header-title">
+      <h1>CTF Monitor Hub</h1>
+      <span id="team-id">Loading...</span>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="conn-status">
+      <div class="conn-dot" id="conn-dot"></div>
+      <span id="conn-label">Connecting...</span>
+    </div>
+    <div class="clock" id="clock">--:--:--</div>
+    <a class="tulip-btn" id="tulip-link" href="#" target="_blank">
+      🌷 Tulip UI
+    </a>
+  </div>
+</header>
+
+<!-- ── Stats Bar ─────────────────────────────────────────────── -->
+<div class="stats-bar">
+  <div class="stat-tile critical">
+    <div class="stat-icon">🚩</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-flag-out">0</div>
+      <div class="stat-label">Flag Exfil</div>
+    </div>
+  </div>
+  <div class="stat-tile critical">
+    <div class="stat-icon">🍯</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-honeytoken">0</div>
+      <div class="stat-label">Honeytoken</div>
+    </div>
+  </div>
+  <div class="stat-tile high">
+    <div class="stat-icon">⚡</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-suricata">0</div>
+      <div class="stat-label">Suricata</div>
+    </div>
+  </div>
+  <div class="stat-tile high">
+    <div class="stat-icon">📡</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-sla">0</div>
+      <div class="stat-label">SLA Events</div>
+    </div>
+  </div>
+  <div class="stat-tile hint">
+    <div class="stat-icon">🤖</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-hints">0</div>
+      <div class="stat-label">ML Hints</div>
+    </div>
+  </div>
+  <div class="stat-tile info">
+    <div class="stat-icon">🧠</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-iocs">0</div>
+      <div class="stat-label">IOC Analyses</div>
+    </div>
+  </div>
+  <div class="stat-tile green">
+    <div class="stat-icon">🕒</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-uptime">00:00</div>
+      <div class="stat-label">Match Time</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Main Grid ─────────────────────────────────────────────── -->
+<div class="main-grid">
+
+  <!-- Left: Alert Feed -->
+  <div class="panel" id="alert-panel">
+    <div class="panel-header">
+      <div class="panel-title">
+        <span>⚡</span> Alert Feed
+        <span class="panel-badge badge-red" id="total-alert-badge">0</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button class="filter-btn active" id="filter-all" onclick="setFilter('all')">ALL</button>
+        <button class="filter-btn" id="filter-critical" onclick="setFilter('critical')">CRITICAL</button>
+        <button class="filter-btn" id="filter-hints" onclick="setFilter('hints')">HINTS</button>
+      </div>
+    </div>
+    <div class="priority-legend">
+      <span style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);">PRIORITY:</span>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-red)"></div>flag-out / honeytoken</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-orange)"></div>suricata / sla-down</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-yellow)"></div>sla-slow</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-purple)"></div>ml-hints (low confidence)</div>
+    </div>
+    <div class="alert-list" id="alert-list">
+      <div class="empty-state">
+        <div class="icon">📡</div>
+        <p>No alerts yet.<br>Waiting for detection events...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right column -->
+  <div class="right-col">
+
+    <!-- Watchdog Status -->
+    <div class="panel" id="watchdog-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>📡</span> Service Watchdog
+          <span class="panel-badge badge-green" id="watchdog-badge">—</span>
+        </div>
+      </div>
+      <div class="service-list" id="service-list">
+        <div style="padding:16px;text-align:center;color:var(--text-dim);font-size:11px;">
+          Polling vulnbox services...
+        </div>
+      </div>
+    </div>
+
+    <!-- ML Hints -->
+    <div class="panel" id="hints-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>🤖</span> ML Bot Hints
+          <span class="panel-badge badge-purple" id="hints-badge">0</span>
+        </div>
+        <span style="font-size:9px;color:var(--text-dim);font-family:var(--font-mono);">HINT ONLY — human review required</span>
+      </div>
+      <div class="hint-list" id="hint-list">
+        <div style="padding:16px;text-align:center;color:var(--text-dim);font-size:11px;">
+          Warming up fingerprinter... (~3 ticks)
+        </div>
+      </div>
+    </div>
+
+    <!-- IOC Brain -->
+    <div class="panel" id="ioc-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>🧠</span> IOC Brain
+          <span class="panel-badge badge-cyan">LOAD-ON-DEMAND</span>
+        </div>
+      </div>
+      <div class="ioc-analyze-form">
+        <input class="ioc-input" id="ioc-input" type="text" placeholder="Flow ID or paste snippet..." />
+        <button class="ioc-btn" id="ioc-btn" onclick="analyzeIOC()">Analyze</button>
+      </div>
+      <pre class="ioc-result" id="ioc-result"></pre>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Footer ─────────────────────────────────────────────────── -->
+<footer>
+  <span>CTF Monitor Hub v1.0 — Air-gap Ready</span>
+  <span id="footer-vulnbox">Vulnbox: —</span>
+  <span id="footer-monitor">Monitor: —</span>
+  <span>⚠️ NO AUTO-BLOCKING — HUMAN DECISION ONLY</span>
+</footer>
+
+<!-- ── Modal ─────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="modal-title">Alert Detail</div>
+      <div class="modal-close" onclick="closeModal()">✕</div>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<!-- ── Toast container ──────────────────────────────────────── -->
+<div id="toast-container"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════
+   CTF Monitor Hub — Dashboard Logic
+════════════════════════════════════════════════════════════ */
+
+const CONFIG = {
+  wsUrl: `ws://${location.host}/ws`,
+  iocUrl: `http://${location.hostname}:5001`,
+  tulipUrl: null,
+};
+
+let ws = null;
+let alertData = [];
+let hintData  = [];
+let watchdogData = {};
+let stats = { flagOut:0, honeytoken:0, suricata:0, sla:0, hints:0, iocs:0 };
+let currentFilter = 'all';
+let startTime = Date.now();
+
+// ── Clock & uptime ────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent =
+    now.toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+  const elapsed = Math.floor((Date.now() - startTime) / 1000);
+  const h = Math.floor(elapsed/3600).toString().padStart(2,'0');
+  const m = Math.floor((elapsed%3600)/60).toString().padStart(2,'0');
+  document.getElementById('stat-uptime').textContent = `${h}:${m}`;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── WebSocket ─────────────────────────────────────────────────
+function connect() {
+  ws = new WebSocket(CONFIG.wsUrl);
+
+  ws.onopen = () => {
+    setConnStatus(true);
+    showToast('Dashboard connected', 'success');
+  };
+
+  ws.onclose = () => {
+    setConnStatus(false);
+    setTimeout(connect, 3000); // auto-reconnect
+  };
+
+  ws.onerror = () => setConnStatus(false);
+
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      handleMessage(msg);
+    } catch(e) { console.error('WS parse error', e); }
+  };
+}
+
+function setConnStatus(connected) {
+  document.getElementById('conn-dot').className = 'conn-dot' + (connected ? ' connected' : '');
+  document.getElementById('conn-label').textContent = connected ? 'LIVE' : 'RECONNECTING...';
+}
+
+function handleMessage(msg) {
+  if (msg.type === 'initial_state') {
+    alertData = msg.alerts || [];
+    hintData  = msg.hints  || [];
+    watchdogData = msg.watchdog || {};
+
+    if (msg.config) {
+      CONFIG.tulipUrl = msg.config.tulip_url || CONFIG.tulipUrl;
+      document.getElementById('tulip-link').href = CONFIG.tulipUrl || '#';
+      document.getElementById('footer-vulnbox').textContent = `Vulnbox: ${msg.config.vulnbox_ip}`;
+      document.getElementById('footer-monitor').textContent = `Monitor: ${msg.config.monitor_ip}`;
+    }
+
+    recalcStats();
+    renderAlerts();
+    renderHints();
+    renderWatchdog();
+    return;
+  }
+
+  // New alert/hint streamed in
+  if (msg.channel === 'alerts_channel' || msg.source === 'detection' || msg.source === 'watchdog') {
+    alertData.unshift(msg);
+    if (alertData.length > 200) alertData.pop();
+    updateStats(msg);
+    renderAlerts();
+    notifyNewAlert(msg);
+  } else if (msg.channel === 'hints_channel' || msg.source === 'ml-fingerprint') {
+    hintData.unshift(msg);
+    if (hintData.length > 100) hintData.pop();
+    stats.hints++;
+    document.getElementById('stat-hints').textContent = stats.hints;
+    document.getElementById('hints-badge').textContent = hintData.length;
+    renderHints();
+  }
+}
+
+// ── Stats ─────────────────────────────────────────────────────
+function recalcStats() {
+  stats = { flagOut:0, honeytoken:0, suricata:0, sla:0, hints:hintData.length, iocs:0 };
+  for (const a of alertData) { updateStats(a, false); }
+  updateStatDisplay();
+}
+
+function updateStats(a, updateDisplay=true) {
+  const t = (a.type || '').toLowerCase();
+  if (t === 'flag-out' || t === 'flag_out') stats.flagOut++;
+  else if (t === 'honeytoken' || t === 'honeytoken-out') stats.honeytoken++;
+  else if (t === 'suricata') stats.suricata++;
+  else if (t.startsWith('sla-')) stats.sla++;
+  if (updateDisplay) updateStatDisplay();
+}
+
+function updateStatDisplay() {
+  document.getElementById('stat-flag-out').textContent   = stats.flagOut;
+  document.getElementById('stat-honeytoken').textContent = stats.honeytoken;
+  document.getElementById('stat-suricata').textContent   = stats.suricata;
+  document.getElementById('stat-sla').textContent        = stats.sla;
+  document.getElementById('stat-hints').textContent      = stats.hints;
+  document.getElementById('stat-iocs').textContent       = stats.iocs;
+  document.getElementById('total-alert-badge').textContent = alertData.length;
+}
+
+// ── Alert rendering ───────────────────────────────────────────
+function getPriority(a) {
+  const t = (a.type || '').toLowerCase();
+  if (t === 'flag-out' || t === 'flag_out' || t === 'honeytoken' || t === 'honeytoken-out') return 'critical';
+  if (t === 'suricata' && (a.severity || 3) <= 1) return 'critical';
+  if (t === 'suricata') return 'high';
+  if (t === 'sla-down') return 'high';
+  if (t === 'sla-slow') return 'medium';
+  if (t === 'sla-restored') return 'info';
+  if (t === 'bot-deviation-hint') return 'hint';
+  if (a.confidence === 'HIGH') return 'high';
+  if (a.confidence === 'MEDIUM') return 'medium';
+  return 'low';
+}
+
+function getTypeClass(type) {
+  const t = (type || '').toLowerCase();
+  if (t === 'flag-out' || t === 'flag_out') return 'type-flag-out';
+  if (t === 'honeytoken' || t === 'honeytoken-out') return 'type-honeytoken';
+  if (t === 'suricata') return 'type-suricata';
+  if (t === 'sla-down') return 'type-sla-down';
+  if (t === 'sla-slow') return 'type-sla-slow';
+  if (t === 'sla-restored') return 'type-sla-restored';
+  if (t === 'bot-deviation-hint') return 'type-bot-hint';
+  if (t === 'ioc-analysis') return 'type-ioc';
+  return 'type-default';
+}
+
+function setFilter(f) {
+  currentFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('filter-' + f)?.classList.add('active');
+  renderAlerts();
+}
+
+function renderAlerts() {
+  const list = document.getElementById('alert-list');
+
+  let filtered = alertData;
+  if (currentFilter === 'critical') {
+    filtered = alertData.filter(a => getPriority(a) === 'critical' || getPriority(a) === 'high');
+  } else if (currentFilter === 'hints') {
+    filtered = alertData.filter(a => getPriority(a) === 'hint');
+  }
+
+  if (filtered.length === 0) {
+    list.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">📡</div>
+        <p>No alerts yet.<br>Waiting for detection events...</p>
+      </div>`;
+    return;
+  }
+
+  // Sort: critical first, then by time
+  const order = { critical:0, high:1, medium:2, low:3, hint:4, info:5 };
+  const sorted = [...filtered].sort((a, b) => {
+    const pa = order[getPriority(a)] ?? 99;
+    const pb = order[getPriority(b)] ?? 99;
+    if (pa !== pb) return pa - pb;
+    return new Date(b.ts || 0) - new Date(a.ts || 0);
+  });
+
+  list.innerHTML = sorted.slice(0, 100).map((a, i) => {
+    const prio = getPriority(a);
+    const typeClass = getTypeClass(a.type);
+    const ts = a.ts ? new Date(a.ts).toLocaleTimeString('en-US', {hour12:false}) : '?';
+    const isNew = i === 0;
+    return `
+      <div class="alert-card prio-${prio} ${isNew && prio==='critical' ? 'new-critical' : ''}"
+           onclick="showModal(${JSON.stringify(JSON.stringify(a)).replace(/'/g, "&#39;")})">
+        <div class="alert-header">
+          <span class="alert-type-badge ${typeClass}">${(a.type||'unknown').toUpperCase()}</span>
+          <span class="alert-message">${escHtml(a.message || 'No message')}</span>
+        </div>
+        <div class="alert-meta">
+          <span class="conf-${a.confidence || 'MEDIUM'}">${a.confidence || '?'}</span>
+          ${a.src_ip ? `<span class="ip">${escHtml(a.src_ip)}</span>` : ''}
+          ${a.dst_ip ? `<span>→ <span class="ip">${escHtml(a.dst_ip)}</span></span>` : ''}
+          ${a.service ? `<span class="ip">${escHtml(a.service)}</span>` : ''}
+          <span style="margin-left:auto;">${ts}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ── Watchdog rendering ────────────────────────────────────────
+function renderWatchdog() {
+  const list = document.getElementById('service-list');
+  const entries = Object.values(watchdogData);
+
+  if (entries.length === 0) {
+    list.innerHTML = `<div style="padding:16px;text-align:center;color:var(--text-dim);font-size:11px;">Polling vulnbox services...</div>`;
+    return;
+  }
+
+  const upCount = entries.filter(e => e.state === 'up').length;
+  document.getElementById('watchdog-badge').textContent = `${upCount}/${entries.length} UP`;
+  document.getElementById('watchdog-badge').className = `panel-badge ${upCount === entries.length ? 'badge-green' : 'badge-red'}`;
+
+  list.innerHTML = entries.map(s => `
+    <div class="service-row">
+      <div class="service-indicator ${s.state || 'unknown'}"></div>
+      <div class="service-name">${escHtml(s.name || '?')}</div>
+      <div class="service-port">:${s.port}</div>
+      <div class="service-latency">${s.state === 'up' ? s.latency_ms + 'ms' : s.state?.toUpperCase()}</div>
+    </div>
+  `).join('');
+}
+
+// Update watchdog status from alerts
+function updateWatchdogFromAlert(a) {
+  if (!a.service) return;
+  const key = `${a.service}:${a.port}`;
+  if (a.type === 'sla-down')      watchdogData[key] = {...(watchdogData[key]||{}), name:a.service, port:a.port, state:'down', latency_ms:a.latency_ms||0};
+  if (a.type === 'sla-slow')      watchdogData[key] = {...(watchdogData[key]||{}), name:a.service, port:a.port, state:'slow', latency_ms:a.latency_ms||0};
+  if (a.type === 'sla-restored')  watchdogData[key] = {...(watchdogData[key]||{}), name:a.service, port:a.port, state:'up',   latency_ms:a.latency_ms||0};
+  renderWatchdog();
+}
+
+// ── Hints rendering ────────────────────────────────────────────
+function renderHints() {
+  const list = document.getElementById('hint-list');
+  document.getElementById('hints-badge').textContent = hintData.length;
+  if (hintData.length === 0) {
+    list.innerHTML = `<div style="padding:16px;text-align:center;color:var(--text-dim);font-size:11px;">Warming up fingerprinter... (~3 ticks)</div>`;
+    return;
+  }
+  list.innerHTML = hintData.slice(0, 40).map(h => `
+    <div class="hint-card">
+      <div class="hint-label">🤖 BOT DEVIATION — tick ${h.tick || '?'}</div>
+      <div class="hint-msg">${escHtml(h.message || '')}</div>
+      <div class="hint-meta">
+        ${h.src_ip ? `src: ${escHtml(h.src_ip)}` : ''}
+        ${h.dst_port ? ` dst: :${h.dst_port}` : ''}
+        ${h.dist_from_bot_cluster ? ` dist: ${h.dist_from_bot_cluster}` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── IOC analysis ──────────────────────────────────────────────
+async function analyzeIOC() {
+  const input = document.getElementById('ioc-input').value.trim();
+  if (!input) return;
+  const btn = document.getElementById('ioc-btn');
+  const result = document.getElementById('ioc-result');
+  btn.disabled = true;
+  btn.textContent = 'Loading LLM...';
+  result.textContent = '⏳ Loading Foundation-Sec-8B Q4 on demand...\n  (first call: ~15-30s on GPU)';
+  result.className = 'ioc-result visible';
+
+  try {
+    const isFlowId = /^[a-f0-9\-]{8,}$/.test(input) || /^\d+$/.test(input);
+    const body = isFlowId
+      ? { flow_id: input }
+      : { log_snippet: input };
+
+    const resp = await fetch(`/api/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch(() => null);
+
+    if (!resp || !resp.ok) {
+      // Fall back to direct IOC API
+      const resp2 = await fetch(`http://${location.hostname}:5001/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp2.json();
+      result.textContent = JSON.stringify(data, null, 2);
+      stats.iocs++;
+      document.getElementById('stat-iocs').textContent = stats.iocs;
+    } else {
+      const data = await resp.json();
+      result.textContent = JSON.stringify(data, null, 2);
+      stats.iocs++;
+      document.getElementById('stat-iocs').textContent = stats.iocs;
+    }
+  } catch(e) {
+    result.textContent = `Error: ${e.message}\n\nMake sure IOC Brain is running:\n  docker compose up ioc-brain`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Analyze';
+  }
+}
+
+// ── Modal ──────────────────────────────────────────────────────
+function showModal(jsonStr) {
+  const a = JSON.parse(jsonStr);
+  document.getElementById('modal-title').textContent = `${(a.type||'Alert').toUpperCase()} — ${a.ts ? new Date(a.ts).toLocaleString() : 'Unknown time'}`;
+  document.getElementById('modal-body').textContent = JSON.stringify(a, null, 2);
+  document.getElementById('modal-overlay').classList.add('open');
+}
+
+function closeModal(e) {
+  if (!e || e.target.id === 'modal-overlay' || e.target.className === 'modal-close') {
+    document.getElementById('modal-overlay').classList.remove('open');
+  }
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal({}); });
+
+// ── Toast notifications ────────────────────────────────────────
+function showToast(msg, type = 'info') {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 3200);
+}
+
+function notifyNewAlert(a) {
+  const prio = getPriority(a);
+  if (prio === 'critical') {
+    showToast(`🚨 CRITICAL: ${(a.message||'').slice(0,60)}`, 'critical');
+    // Optional: browser notification
+    if (Notification.permission === 'granted') {
+      new Notification('CTF ALERT', { body: a.message, icon: '🛡' });
+    }
+  } else if (prio === 'high') {
+    showToast(`⚠️ ${(a.message||'').slice(0,60)}`, 'critical');
+  }
+
+  // Update watchdog from SLA alerts
+  if ((a.type||'').startsWith('sla-')) updateWatchdogFromAlert(a);
+}
+
+// ── Notifications permission ───────────────────────────────────
+if (Notification.permission === 'default') {
+  Notification.requestPermission();
+}
+
+// ── Util ──────────────────────────────────────────────────────
+function escHtml(s) {
+  if (typeof s !== 'string') return String(s || '');
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Poll for watchdog status every 5s ─────────────────────────
+async function pollWatchdog() {
+  try {
+    const resp = await fetch('/api/watchdog');
+    if (resp.ok) {
+      watchdogData = await resp.json();
+      renderWatchdog();
+    }
+  } catch(e) {}
+}
+setInterval(pollWatchdog, 5000);
+
+// ── Poll for recent alerts if WS disconnected ──────────────────
+async function pollAlerts() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  try {
+    const [ar, hr] = await Promise.all([
+      fetch('/api/alerts?n=50').then(r=>r.json()).catch(()=>[]),
+      fetch('/api/hints?n=30').then(r=>r.json()).catch(()=>[]),
+    ]);
+    alertData = ar;
+    hintData  = hr;
+    recalcStats();
+    renderAlerts();
+    renderHints();
+  } catch(e) {}
+}
+setInterval(pollAlerts, 8000);
+
+// ── Fetch config ───────────────────────────────────────────────
+async function loadConfig() {
+  try {
+    const resp = await fetch('/api/config').catch(()=>null);
+    if (resp && resp.ok) {
+      const cfg = await resp.json();
+      document.getElementById('team-id').textContent = `Team: ${cfg.team_id || 'unknown'} | Vulnbox: ${cfg.vulnbox_ip || '?'}`;
+    } else {
+      document.getElementById('team-id').textContent = 'CTF Monitor Hub — Attack-Defense';
+    }
+  } catch(e) {
+    document.getElementById('team-id').textContent = 'CTF Monitor Hub';
+  }
+}
+
+// ── Enter key for IOC input ────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('ioc-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') analyzeIOC();
+  });
+});
+
+// ── Bootstrap ─────────────────────────────────────────────────
+loadConfig();
+connect();
+pollWatchdog();
+</script>
+</body>
+</html>

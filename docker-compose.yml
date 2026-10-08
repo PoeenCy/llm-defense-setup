@@ -1,0 +1,235 @@
+version: "3.8"
+
+# CTF Monitor Hub — Master docker-compose
+# All services read config from services.json via environment variables
+# set by bringup.sh before calling this file.
+
+services:
+
+  # ============================================================
+  # Mock vulnbox — single-machine stand-in for a real vulnbox target
+  # (svc1 HTTP :9001, svc2 raw TCP :9002). Reachable by ctf_proxy via
+  # Docker DNS (hostname "mock-vulnbox") — no static IP needed here;
+  # ctf_proxy is what claims the vulnbox.ip address on vulnbox-edge.
+  # ============================================================
+  mock-vulnbox:
+    build:
+      context: ./mock-vulnbox
+      dockerfile: Dockerfile
+    container_name: ctf-mock-vulnbox
+    restart: unless-stopped
+    environment:
+      - SVC1_PORT=9001
+      - SVC2_PORT=9002
+    networks:
+      - ctf-net
+
+  # ============================================================
+  # Redis — shared alert queue (Items 4, 5, 7, 8)
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ctf-redis
+    restart: unless-stopped
+    ports:
+      - "${ALERT_QUEUE_PORT:-6380}:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - ctf-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ============================================================
+  # Detection service — flag-out regex + honeytoken collector (Item 4)
+  # ============================================================
+  detection:
+    build:
+      context: ./detection
+      dockerfile: Dockerfile
+    container_name: ctf-detection
+    restart: unless-stopped
+    ports:
+      - "${HONEYTOKEN_PORT:-9999}:9999"
+    environment:
+      - FLAG_REGEX=${FLAG_REGEX}
+      - HONEYTOKEN_FLAG=${HONEYTOKEN_FLAG}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MONITOR_IP=${MONITOR_IP}
+      - TEAMS_CIDR=${TEAMS_CIDR}
+      - TRAFFIC_DIR=/traffic
+      - SURICATA_DIR=/suricata
+    volumes:
+      - ./traffic:/traffic:ro
+      - ./suricata/log:/suricata:ro
+      - ./services.json:/app/services.json:ro
+    networks:
+      - ctf-net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ============================================================
+  # ML Fingerprint service — L3/L4 bot detection (Item 5)
+  # ============================================================
+  ml-fingerprint:
+    build:
+      context: ./ml-fingerprint
+      dockerfile: Dockerfile
+    container_name: ctf-ml-fingerprint
+    restart: unless-stopped
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TRAFFIC_DIR=/traffic
+      - MONITOR_IP=${MONITOR_IP}
+      - TEAMS_CIDR=${TEAMS_CIDR}
+    volumes:
+      - ./traffic:/traffic:ro
+      - ./services.json:/app/services.json:ro
+    networks:
+      - ctf-net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ============================================================
+  # Watchdog — SLA poller for vulnbox services (Item 7)
+  # ============================================================
+  watchdog:
+    build:
+      context: ./watchdog
+      dockerfile: Dockerfile
+    container_name: ctf-watchdog
+    restart: unless-stopped
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - VULNBOX_IP=${VULNBOX_IP}
+      - MONITOR_IP=${MONITOR_IP}
+    volumes:
+      - ./services.json:/app/services.json:ro
+    networks:
+      - ctf-net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ============================================================
+  # IOC Brain API — load-on-demand LLM analysis (Item 6)
+  # ============================================================
+  # ============================================================
+  # MCP server — read-only access to Tulip's flow data (TimescaleDB)
+  # for ioc-brain. Write-safety is DB-enforced via the tulip_ro role.
+  # ============================================================
+  mcp-tulip:
+    build:
+      context: ./mcp-tulip
+      dockerfile: Dockerfile
+    container_name: ctf-mcp-tulip
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      - POSTGRES_RO_URI=${MCP_POSTGRES_RO_URI}
+      - MCP_PORT=8765
+    networks:
+      - ctf-net
+
+  ioc-brain:
+    build:
+      context: ./ioc-brain
+      dockerfile: Dockerfile
+    container_name: ctf-ioc-brain
+    restart: unless-stopped
+    ports:
+      - "${IOC_API_PORT:-5001}:5001"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MCP_URL=http://mcp-tulip:8765/mcp
+      - OLLAMA_HOST=http://${DOCKER_HOST_GATEWAY:-host.docker.internal}:${OLLAMA_PORT:-11434}
+      - LLM_MODEL=${LLM_MODEL}
+      - EMBED_MODEL=${EMBED_MODEL}
+      - GPU_LAYERS=${GPU_LAYERS:-20}
+    volumes:
+      - ./vault:/vault:ro
+      - ./services.json:/app/services.json:ro
+    networks:
+      - ctf-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+      mcp-tulip:
+        condition: service_started
+
+  # ============================================================
+  # Dashboard — unified monitoring UI (Item 8)
+  # ============================================================
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: ctf-dashboard
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TULIP_URL=http://${DOCKER_HOST_GATEWAY:-host.docker.internal}:${TULIP_WEB_PORT:-3000}
+      - IOC_API_URL=http://ioc-brain:5001
+      - MONITOR_IP=${MONITOR_IP}
+      - VULNBOX_IP=${VULNBOX_IP}
+    volumes:
+      - ./services.json:/app/services.json:ro
+    networks:
+      - ctf-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ============================================================
+  # AnythingLLM — RAG over vault/ docs (Item 6)
+  # ============================================================
+  anythingllm:
+    image: mintplexlabs/anythingllm:latest
+    container_name: ctf-anythingllm
+    restart: unless-stopped
+    ports:
+      - "${ANYTHINGLLM_PORT:-3001}:3001"
+    environment:
+      - STORAGE_DIR=/app/server/storage
+      - JWT_SECRET=ctf-monitor-secret-change-me
+      - LLM_PROVIDER=ollama
+      - OLLAMA_BASE_PATH=http://${DOCKER_HOST_GATEWAY:-host.docker.internal}:${OLLAMA_PORT:-11434}
+      - OLLAMA_MODEL_PREF=${LLM_MODEL}
+      - OLLAMA_EMBEDDING_MODEL_PREF=${EMBED_MODEL}
+      - EMBEDDING_ENGINE=ollama
+      - EMBEDDING_BASE_PATH=http://${DOCKER_HOST_GATEWAY:-host.docker.internal}:${OLLAMA_PORT:-11434}
+    volumes:
+      - anythingllm-storage:/app/server/storage
+      - ./vault:/vault:ro
+    networks:
+      - ctf-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  anythingllm-storage:
+
+networks:
+  ctf-net:
+    name: ctf-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24
+          ip_range: 10.0.0.16/28

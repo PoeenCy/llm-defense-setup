@@ -1,0 +1,91 @@
+{
+  "_comment": "SINGLE SOURCE OF TRUTH \u2014 edit only this file. All components read from it.",
+  "team_id": "my-team",
+  "vulnbox": {
+    "ip": "10.0.0.2",
+    "ssh_user": "root",
+    "ssh_port": 22,
+    "capture_iface": "eth0",
+    "pcap_broker_port": 4242
+  },
+  "monitor_host": {
+    "ip": "10.0.0.50",
+    "dashboard_port": 8080,
+    "alert_queue_port": 6380,
+    "ioc_api_port": 5001
+  },
+  "flag": {
+    "regex": "[A-Z0-9]{31}=",
+    "submit_url": "http://gameserver/submit",
+    "note": "confirm exact regex with organizer at round 1"
+  },
+  "teams_cidr": "10.60.0.0/16",
+  "gameserver_hint": {
+    "ip": "10.60.255.1",
+    "note": "may be NATed; do not rely on IP alone for filtering"
+  },
+  "honeytoken": {
+    "flag": "HONEYTOKEN0000000000000000000=",
+    "endpoint_port": 9999,
+    "note": "a fake flag placed in a trap file on the vulnbox; if seen outbound it means compromise"
+  },
+  "tulip": {
+    "web_port": 3000,
+    "ingestor_port": 5001,
+    "note": "Tulip stores flows in TimescaleDB/Postgres, not Mongo \u2014 see mcp.postgres_ro_uri"
+  },
+  "mock_vulnbox": {
+    "enabled": true,
+    "hostname": "mock-vulnbox",
+    "note": "single-machine stand-in for a real vulnbox; ctf_proxy fronts it at vulnbox.ip"
+  },
+  "ctf_proxy": {
+    "keyword": "CTFMONITOR_BLOCKED",
+    "listen_ip": "10.0.0.2",
+    "nginx": {
+      "connect_timeout": 5,
+      "max_fails": 1,
+      "fail_timeout": 20
+    },
+    "dos": {
+      "enabled": false,
+      "duration": 60,
+      "interval": 2
+    },
+    "note": "keyword MUST stay the single source other tools read from \u2014 do not hardcode elsewhere"
+  },
+  "mcp": {
+    "postgres_role": "tulip_ro",
+    "postgres_db": "tulip",
+    "postgres_host_port": 5433,
+    "port": 8765,
+    "note": "postgres_host_port is Tulip's timescale container, exposed to host so mcp-tulip (on ctf-net) can reach it; bringup.sh builds the full URI using the same DOCKER_HOST_GATEWAY resolution as ioc-brain's Ollama access"
+  },
+  "ollama": {
+    "port": 11434,
+    "llm_model": "foundation-sec-8b-chat",
+    "llm_base_model": "hf.co/Mungert/Foundation-Sec-8B-GGUF:Q4_K_M",
+    "embed_model": "nomic-embed-text",
+    "gpu_layers": 20,
+    "note": "load on demand only; never keep resident. gpu_layers=20 fits ~2.5GB VRAM for Q4_K_M 8B"
+  },
+  "anythingllm": {
+    "port": 3001
+  },
+  "services": [
+    {
+      "name": "svc1",
+      "port": 9001,
+      "proto": "tcp",
+      "layer": "l7-http",
+      "description": "Example HTTP service"
+    },
+    {
+      "name": "svc2",
+      "port": 9002,
+      "proto": "tcp",
+      "layer": "l4-raw",
+      "description": "Example raw TCP service"
+    }
+  ]
+}

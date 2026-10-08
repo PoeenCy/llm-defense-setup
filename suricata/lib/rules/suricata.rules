@@ -1,0 +1,7 @@
+# Minimal starter ruleset for the CTF Monitor Hub.
+# Replace/extend with a real ruleset (e.g. Emerging Threats Open:
+# https://rules.emergingthreats.net/open/suricata-7.0.3/emerging-all.rules)
+# before competition day — this file only has test/example rules.
+
+alert http any any -> any any (msg:"CTF-TEST Login endpoint accessed"; http.uri; content:"/login"; sid:1000001; rev:1;)
+alert tcp any any -> any any (msg:"CTF-TEST Possible flag exfil pattern"; content:"flag="; nocase; sid:1000002; rev:1;)
