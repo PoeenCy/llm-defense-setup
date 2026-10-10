@@ -94,6 +94,10 @@ Three layers:
    server whose Postgres role is `GRANT SELECT`-only — a write attempt is rejected by the
    database itself, not by convention.
 
+## Chuẩn bị bài ngân hàng có sự cố ransomware
+
+Với graph PHP/PostgREST/Deno trên Vulnbox và Radar trên workstation, dùng [template tinh gọn tại gốc repo](../../README.md) cùng [sổ tay recovery/WAF](../../HUONG_DAN_THUC_CHIEN.md). Các lệnh `bringup.sh` bên dưới thuộc monitor hub mở rộng và demo; không thay cho khôi phục service thật hoặc triển khai WAF ba backend. Không áp filter raw TCP lên checker trước khi kiểm chứng protocol.
+
 ## Quick start
 
 ```bash

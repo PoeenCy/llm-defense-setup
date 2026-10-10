@@ -15,13 +15,13 @@ if [[ ! -f "$CONFIG" ]]; then
     echo -e "${RED}[FATAL]${NC} Config file not found: $CONFIG"; exit 1
 fi
 
-if ! python3 -c "import json,sys; json.load(open('$CONFIG'))" 2>/dev/null; then
+if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CONFIG" 2>/dev/null; then
     echo -e "${RED}[FATAL]${NC} $CONFIG is not valid JSON"; exit 1
 fi
 ok "JSON syntax valid"
 
 # Run the bulk of validation in Python (avoids shell quoting nightmares with dotted paths)
-python3 << 'PYEOF'
+python3 - "$CONFIG" << 'PYEOF'
 import json, re, sys, ipaddress
 
 CONFIG = sys.argv[1] if len(sys.argv) > 1 else "services.json"
