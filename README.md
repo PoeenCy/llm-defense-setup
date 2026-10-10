@@ -11,7 +11,7 @@ and SLA watchdogs — all driven from one config file.
 [![Docker Compose](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![Ollama](https://img.shields.io/badge/LLM-Foundation--Sec--8B-orange)](https://huggingface.co/fdtn-ai/Foundation-Sec-8B)
 
-[Architecture](docs/ARCHITECTURE.md) · [Runbook](docs/RUNBOOK.md) · [Config schema](docs/SCHEMA.md) · [Verified status](docs/STATUS.md) · [Demo script](docs/DEMO.md) · [Run the LLM on a separate machine](docs/REMOTE_LLM.md) · [Go live on competition day](docs/GOLIVE.md)
+[⚡ Quick Radar (Live Defense UI)](quick-radar/README.md) · [Architecture](docs/ARCHITECTURE.md) · [Runbook](docs/RUNBOOK.md) · [Config schema](docs/SCHEMA.md) · [Verified status](docs/STATUS.md) · [Demo script](docs/DEMO.md) · [Run the LLM on a separate machine](docs/REMOTE_LLM.md) · [Go live on competition day](docs/GOLIVE.md)
 
 </div>
 

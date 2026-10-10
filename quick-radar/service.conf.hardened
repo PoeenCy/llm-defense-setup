@@ -1,0 +1,116 @@
+map $http_upgrade $connection_upgrade {
+    default      upgrade;
+    ''           close;
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    merge_slashes on;
+
+    # =========================================================================
+    # 1. BẢO VỆ STORAGE: CHẶN TRIỆT ĐỂ WEBSHELL TRONG UPLOADS / LOGS
+    # Checker chỉ tải & đọc file .csv, .json, .txt, .log, .out -> Hoàn toàn an toàn!
+    # =========================================================================
+    location ~* (logs|uploads|files)/.*\.ph {
+        return 403 "Blocked: Script execution in storage directory is forbidden\n";
+    }
+
+    # Chặn CVE PHPUnit và thư mục vendor
+    location ~* /(vendor|phpunit) {
+        return 403 "Blocked: Vendor access forbidden\n";
+    }
+
+    # Chặn Command Injection trên PostgREST RPC
+    location ~* ^/api/rpc/(exec_command|c) {
+        return 403 "Blocked: RPC exec forbidden\n";
+    }
+
+    # =========================================================================
+    # 2. BẢO VỆ CHAT: CHỐNG DUMP FLAG QUA POSTGREST (SLA 100% AN TOÀN)
+    # Cho phép POST (Checker tạo cờ). Chỉ chặn GET khi không có id=eq.<số> (đối thủ dump)
+    # =========================================================================
+    location = /api/messages {
+        set $block_unauth 0;
+        if ($request_method = GET) {
+            set $block_unauth 1;
+        }
+        if ($args ~* "id=eq\.[0-9]+") {
+            set $block_unauth 0;
+        }
+        if ($block_unauth = 1) {
+            return 403 "Blocked: Unauthorized messages dump\n";
+        }
+        proxy_pass http://service;
+        proxy_ssl_verify off;
+        proxy_set_header Host $http_host;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_connect_timeout 5;
+        proxy_send_timeout 90;
+        proxy_read_timeout 90;
+    }
+
+    # =========================================================================
+    # 3. BẢO VỆ MATHSAYS: CHO PHÉP KÝ TỰ TOÁN HỌC (*, ;, $, <, >) CỦA CHECKER BOT!
+    # Chỉ chặn Command Substitution thực sự: ` (backtick), $(), và đường dẫn flag
+    # =========================================================================
+    location /mathsays {
+        if ($args ~* "(`|%60|\$\(|flag|/usr/share|/etc/passwd)") {
+            return 403 "Blocked: Command substitution / flag path detected on mathsays\n";
+        }
+        proxy_pass http://service;
+        proxy_ssl_verify off;
+        proxy_set_header Host $http_host;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_connect_timeout 5;
+        proxy_send_timeout 90;
+        proxy_read_timeout 90;
+    }
+
+    # =========================================================================
+    # 4. BỘ LỌC WAF NGHIÊM NGẶT CHO TOÀN BỘ CÁC ROUTE CÒN LẠI (LOCATION /)
+    # =========================================================================
+    location / {
+        # 4.1. Chặn tham số thực thi shell độc hại
+        if ($args ~* "(cmd=|command=|exec=|sh=|eval=|passthru=|system=|payload=)") {
+            return 403 "Blocked: Malicious parameter detected\n";
+        }
+
+        # 4.2. Chặn các ký tự nhào lộn / wildcard shell (* ? ` $ " ' \ | ; & < >)
+        if ($args ~* "(\*|\?|`|\$|\"|'|\\|\||;|&|<|>|%22|%27|%2a|%3b|%7c|%24|%60)") {
+            return 403 "Blocked: Shell metacharacters / obfuscation detected\n";
+        }
+
+        # 4.3. Chặn họ lệnh đọc file & công cụ shell Linux
+        if ($args ~* "(^|[^a-zA-Z0-9])(cat|nl|tac|more|less|head|tail|strings|base64|awk|sed|grep|xxd|od|paste|diff|sort|curl|wget|python|perl|bash|sh|ruby|php|nc)($|[^a-zA-Z0-9])") {
+            return 403 "Blocked: File reading command detected\n";
+        }
+
+        # 4.4. Chặn đường dẫn nhạy cảm hệ thống
+        if ($args ~* "(/usr/share|/flag|/etc/passwd|/proc/|/root/|/tmp/|flag\.txt)") {
+            return 403 "Blocked: Sensitive path access detected\n";
+        }
+
+        proxy_pass http://service;
+        proxy_ssl_verify off;
+        proxy_set_header Host $http_host;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_redirect https:// http://;
+        proxy_buffering off;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 5;
+        proxy_send_timeout 90;
+        proxy_read_timeout 90;
+    }
+}
