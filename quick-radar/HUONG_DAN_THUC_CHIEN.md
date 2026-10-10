@@ -212,3 +212,4 @@ WAF ở cổng 80 chỉ là "áo giáp ngoài". Bạn phải xử lý triệt đ
 | `./start_dashboard.sh 8888` | Bật Radar Web UI giám sát 20 đội thời gian thực | Workstation |
 | `ollama run foundation-sec-8b-chat:latest` | Chat trực tiếp với AI an ninh mạng Cisco trong terminal | Workstation |
 | `./pull_pcaps.sh` | Kéo file PCAP về máy phân tích Tulip Forensics | Workstation |
+| `./reset_tulip_session.sh` | Dọn sạch PCAP cũ & reset database Tulip cho CTF mới | Workstation |
