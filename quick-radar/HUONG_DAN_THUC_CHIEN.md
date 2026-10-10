@@ -1,171 +1,214 @@
-# Sổ tay ngân hàng CTF: recovery, defense và attack
+# 🛡️ SỔ TAY TÁC CHIẾN CTF ATTACK-DEFENSE (CHÍNH THỨC)
 
-## Graph dùng cho template
+> **Mục tiêu tối thượng**: Bảo toàn 100% SLA Checker bot (không bị trừ điểm), chặn đứng 20 đội đối thủ khai thác tự động, và cung cấp thông tin cho đội Tấn công (ATK).
+
+---
+
+## ⚡ QUY TRÌNH TÁC CHIẾN TUẦN TỰ 5 BƯỚC (CHUẨN NHẤT)
 
 ```mermaid
-flowchart LR
-    Checker["Checker 10.13.1.10"] --> WAF
-    Teams["Các đội trong mạng thi đấu"] --> WAF
-    subgraph Box["Vulnbox 10.13.2.10"]
-        WAF["Nginx :80\nMiễn checker theo peer IP"]
-        WAF --> PHP["PHP upload-log :8080"]
-        WAF --> API["PostgREST :3000"]
-        WAF --> Math["Deno mathsays :8000"]
-        WAF --> Log["access.log JSON\nrequest + upstream + WAF reason"]
-    end
-    Log -->|"SSH tail -F, host key đã pin"| Radar
-    subgraph WS["Workstation"]
-        Radar["Live Radar 127.0.0.1:8888"] <--> Ollama["Ollama 127.0.0.1:11434\nAI ngoài đường request checker"]
-        Clean["Bản ngân hàng sạch + SHA-256"]
-        Operator["Người thi / đồng đội"] --> Radar
-        Operator --> Deploy["setup_ctf.sh deploy"]
-        Clean --> Deploy
-    end
-    Deploy -->|"Recovery + probes + WAF + rollback"| Box
+flowchart TD
+    G0["⏱️ Phút 0-2: Quét Port & Service\nSSH vào Box -> ss -tulpn / docker ps\nXác định cổng Public & Backend"] --> G1
+    G1["⏱️ Phút 2-5: Đồng Bộ & Backup\nChạy ./set_target.sh trên máy mình\nBackup sạch /var/www và /etc"] --> G2
+    G2["⏱️ Phút 5-7: Triển Khai WAF\n./push_def.sh đẩy 5 tầng bảo vệ\nKiểm tra Checker SLA không bị gãy"] --> G3
+    G3["⏱️ Phút 7-10: Bật Live Radar & AI\n./start_dashboard.sh 8888\nTheo dõi log 20 đội & phân tích đòn lạ"] --> G4
+    G4["⏱️ Phút 10+: Xử Lý 4 Case & Vá Sâu\nKhóa cổng lậu -> Chặn webshell -> Siết DB -> Vá Deno"]
 ```
 
-Các backend chỉ nên có đường truy cập đúng thiết kế. Nginx và backend khác container thì `127.0.0.1` không trỏ tới container khác: sinh profile với DNS của từng container. Không tự đổi firewall/bind trước khi kiểm tra tuyến checker thực tế.
+---
 
-## 1. Chuẩn bị một lần theo bài đã thực hành
+### BƯỚC 1: QUÉT PORT & NHẬN DIỆN DỊCH VỤ (PHÚT 0 - 2)
 
-1. Giữ bản source/config sạch và version runtime từ ngân hàng, **trước khi máy bị chiếm quyền**. Lưu offline trên workstation; không commit secrets, PCAP hoặc flag đang sống.
-2. Ghi đúng IP checker, routing, site Nginx đang dùng, schema messages/chats và binary/đường source của mathsays. Điền `config.env`, `DEF/checker_probes.json`, `DEF/recovery_plan.json`.
-3. Pin fingerprint SSH từ nguồn BTC. `StrictHostKeyChecking=yes` không tự chấp nhận host bị thay key. Không copy private key/token của workstation lên Vulnbox.
-4. Chạy rehearsal khôi phục trên bản sao bài: checksum, owner/mode, restart đúng service, upload–download, POST–GET chat và kết quả mathsays phải khớp checker. File example chỉ là điểm bắt đầu; route PHP/schema và biểu thức mathsays cần điền đúng bài.
+> [!IMPORTANT]
+> **Đề thi không bao giờ cho trước danh sách port đầy đủ**. Ngay khi nhận IP và SSH từ Ban Tổ Chức (BTC), mở terminal SSH vào Vulnbox ngay lập tức để kiểm tra.
 
-```bash
-./set_target.sh 10.13.2.10 2201 ~/.ssh/cyberknight_id "80 8080 3000 8000" 2
-./setup_ctf.sh prepare
-./setup_ctf.sh verify
+1. **SSH vào Vulnbox**:
+   ```bash
+   ssh -p <SSH_PORT> root@<VULNBOX_IP>
+   ```
 
-# Nếu Deno nhận path / thay vì /mathsays:
-./setup_ctf.sh prepare --math-prefix strip
+2. **Chạy 1 lệnh duy nhất để quét mọi cổng đang LISTEN**:
+   ```bash
+   ss -tulpn
+   # (Nếu máy không có ss thì dùng: netstat -tulpn)
+   ```
+   **Cách đọc kết quả bảng cổng:**
+   - `0.0.0.0:22`: Cổng SSH (hệ thống, bỏ qua).
+   - `0.0.0.0:80`: Cổng Web Nginx (Public chính).
+   - `0.0.0.0:xxxx` hoặc `:::xxxx`: **Đây là các cổng Public của đề thi** mà mạng ngoài có thể kết nối vào!
+   - `127.0.0.1:yyyy`: Cổng nội bộ (Backend giấu sau Nginx, ví dụ: 8080, 3000, 8000).
 
-# Nếu Nginx trong Docker, thay bằng tên upstream đã kiểm chứng:
-./setup_ctf.sh prepare --php php:8080 --api postgrest:3000 --maths mathsays:8000
+3. **Kiểm tra Docker (nếu đề thi chạy Container)**:
+   ```bash
+   docker ps
+   ```
+   *Nhìn vào cột `PORTS`: Ví dụ `0.0.0.0:8001->80/tcp`, `0.0.0.0:8002->5000/tcp` ➡️ Các cổng thi đấu là `8001 8002`.*
 
-# Nếu router gốc http://service còn điều phối cả ba service:
-./setup_ctf.sh prepare --topology router --router service
-```
+4. **Kiểm tra Nginx Reverse Proxy (nếu gom chung về port 80)**:
+   ```bash
+   grep -rn "proxy_pass" /etc/nginx/
+   ```
+   *Ví dụ thấy `proxy_pass http://127.0.0.1:3000/` và `8080/` ➡️ Toàn bộ traffic đi qua cổng `80`.*
 
-Profile direct mặc định strip `/api/` khi chuyển tới PostgREST và preserve `/mathsays`. Nếu PostgREST/router của bài cần giữ `/api/`, dùng `--api-prefix preserve`. Đổi prefix phải rehearsal; IP miễn checker không sửa được routing sai.
+---
 
-Nginx include cần được load **một lần trong `http {}`**, thay đúng site có thật. Cần Nginx >= 1.17.6 với proxy, limit_req và realip module. Biến `$realip_remote_addr` dùng peer TCP gốc, kể cả khi `$remote_addr` đã được realip module đổi. Không chèn file vào một `server {}` khác, không bật thêm default server trùng `:80`.
+### BƯỚC 2: ĐỒNG BỘ CẤU HÌNH & BACKUP DỮ LIỆU GỐC (PHÚT 2 - 5)
 
-## 2. WAF phải bảo toàn checker
+Quay về terminal trên máy phòng thủ của bạn (Workstation):
 
-`CHECKER_IPS` là danh sách IP nguồn mà Nginx trực tiếp quan sát, mặc định `10.13.1.10`. Khi sinh candidate, map này cho checker đi qua **mọi signature, method, route, query rule**. Rate-limit key của checker là chuỗi rỗng nên không bị tính hạn mức, kể cả bật enforcement. Không miễn chặn theo `X-Forwarded-For` hay User-Agent do người gửi kiểm soát.
+1. **Chạy script đồng bộ IP, Port, SSH và Team ID**:
+   ```bash
+   cd /home/katsuo/gd1
 
-Không cấu hình `real_ip_header`/`set_real_ip_from` để tin nguồn không đáng tin. Nếu checker qua NAT hoặc proxy của BTC, phải xác định peer IP đúng và phạm vi tin cậy trước khi chạy; không miễn toàn mạng thi đấu khi các đội dùng chung nguồn.
+   # Cách A: Truyền thẳng tham số:
+   # Cú pháp: ./set_target.sh <IP_BOX> <SSH_PORT> <SSH_KEY> "<SERVICE_PORTS>" <MY_TEAM_ID>
+   ./set_target.sh 10.13.2.10 2201 ~/.ssh/cyberknight_id "80" 2
 
-Mặc định:
+   # Cách B: Chế độ tương tác (nhập từng dòng theo gợi ý):
+   ./set_target.sh
+   ```
+   *Điền đúng các cổng vừa tìm thấy ở Bước 1 vào mục `SERVICE_PORTS` (ví dụ `"80"` hoặc `"8001 8002 9000"`).*
 
-| Lớp | Checker | Nguồn khác |
-| --- | --- | --- |
-| Storage `.ph*`, vendor, dotfiles | Pass | Chặn dấu hiệu tương ứng |
-| GET/HEAD messages | Pass mọi query | Chỉ bộ lọc ID + select cột đã liệt kê |
-| GET/HEAD chats | Pass mọi query | ID/name filter + select cột đã liệt kê |
-| POST chats/messages | Pass | Query rỗng hoặc select cột đã liệt kê |
-| Method API, view/table/RPC khác | Pass | Giới hạn route; RPC mặc định không expose qua edge |
-| Mathsays | Pass | Signature substitution query, có xét mixed/double encoding |
-| Rate limit | Không tính hạn mức | Dry-run; không chặn cho tới khi bật enforcement |
+2. **Kiểm tra kết nối và tính hợp lệ**:
+   ```bash
+   ./ssh_box.sh id
+   # Phải in ra: uid=0(root) gid=0(root)...
+   ```
 
-`client_max_body_size 0` tránh thêm giới hạn upload ở edge khi chưa biết contract checker. Giữ timeout proxy 90s. Quyền app, quota storage và tài nguyên OS vẫn cần cấu hình theo bài; không hạ limit chung dựa trên cảm tính. Không bật `sub_filter` đổi flag vì checker cần nhận nguyên dữ liệu.
+3. **Tạo bản Backup sạch tại Vulnbox (PHẢI LÀM TRƯỚC KHI SỬA BẤT CỨ GÌ)**:
+   ```bash
+   ./ssh_box.sh "tar -czf /root/backup_clean_$(date +%s).tar.gz /var/www /etc/nginx 2>/dev/null || true"
+   ```
 
-Đây là mitigation, **không phải quyền đọc**: biết ID vẫn có thể đọc nếu DB cho phép. Chữ ký mathsays không xử lý body/header và không chứng minh hết command injection. Không gọi GET dữ liệu hợp lệ của PostgREST là SQL injection nếu chưa có bằng chứng.
+---
 
-## 3. Khi máy bị chiếm quyền hoặc mã hóa
+### BƯỚC 3: TRIỂN KHAI WAF 5 TẦNG BẢO VỆ CHECKER SLA (PHÚT 5 - 7)
 
-```bash
-# Workstation: chạy đúng plan đã rehearsal.
-./setup_ctf.sh deploy \
-  --target /etc/nginx/sites-enabled/service.conf \
-  --probes DEF/checker_probes.json \
-  --recover DEF/recovery_plan.json --clean-bundle ./clean-bank
+> [!CAUTION]
+> **Quy tắc vàng của Attack-Defense**: Thà bị đối thủ ăn 1 cờ còn hơn bị trừ điểm SLA toàn trận! WAF phải miễn trừ hoàn toàn IP của Checker bot (`10.13.1.10`) theo kết nối TCP gốc (`$realip_remote_addr`).
 
-# Dịch vụ đang hoạt động: bỏ phần --recover/--clean-bundle.
-./setup_ctf.sh radar
-```
+1. **Đẩy WAF Nginx 5 tầng lên Vulnbox**:
+   ```bash
+   ./push_def.sh
+   ```
+   *Script tự động copy file WAF, kiểm tra cú pháp `nginx -t` và `systemctl reload nginx` an toàn.*
 
-Chuỗi chạy: triage hiện trạng → verify toàn bộ checksum → lưu file sắp thay → atomic restore → restart unit/container đã liệt kê → probe → baseline probe WAF → backup site → `nginx -t` → reload → probe → capture.
+2. **Kiểm tra nhanh xem WAF hoạt động đúng và KHÔNG phá hoại SLA**:
+   ```bash
+   # Test 1: Truy vấn dump cờ trái phép PHẢI BỊ CHẶN 403
+   curl -s -o /dev/null -w "%{http_code}\n" "http://10.13.2.10/api/messages"
+   # Kỳ vọng: 403
 
-Nếu thấy tiến trình vẫn đang mã hóa, xác nhận PID/binary/parent/service liên quan rồi cô lập **đúng tiến trình đó** trước khi restore. Template không tự kill theo tên chung, đổi mật khẩu tất cả user, xóa keys/cron hoặc flush firewall. Các thao tác đó có thể làm mất SSH, job checker và service flags.
+   # Test 2: Truy vấn webshell .php trong logs PHẢI BỊ CHẶN 403
+   curl -s -o /dev/null -w "%{http_code}\n" "http://10.13.2.10/log-api/logs/test.php"
+   # Kỳ vọng: 403
 
-Recovery plan chỉ khôi phục file đã liệt kê và pin SHA-256. Không khôi phục toàn filesystem/DB bằng bản ngân hàng cũ khi đang có flag còn sống. Với DB đã bị mã hóa, dùng backup/restore theo bài đã thực hành và kiểm tra dữ liệu/tick; generic file restore không thay PostgreSQL backup hợp lệ.
+   # Test 3: Truy vấn có ID hợp lệ PHẢI ĐƯỢC PHÉP QUA (200 hoặc 201)
+   curl -s -o /dev/null -w "%{http_code}\n" "http://10.13.2.10/api/messages?id=eq.1"
+   # Kỳ vọng: 200 hoặc 404 (Không phải 403)
+   ```
 
-Khi checksum nguồn sạch sai, script dừng trước khi thay file. Khi restart/probe thất bại, nó đưa file về trạng thái trước thao tác. **Trạng thái trước thao tác có thể vẫn bị hỏng**: rollback bảo toàn bằng chứng, không phải bảo đảm khôi phục. Active malware hoặc host/root đã bị chiếm có thể làm sai kết quả; cần đối chiếu từ workstation và giải pháp khôi phục của BTC.
+---
 
-## 4. Probe và rollback
+### BƯỚC 4: KHỞI CHẠY LIVE RADAR & AI ASSISTANT (PHÚT 7 - 10)
 
-Probe manifest thực thi request thực tế với status, nội dung và deadline; hỗ trợ lấy ID từ POST rồi dùng lại cho GET. Dùng marker giả `gd1-readiness-probe`, không flag thật. Các POST có thể để lại bản ghi test; dọn theo cách bài cho phép sau rehearsal.
+1. **Khởi động Local AI (Ollama Foundation-Sec-8B-Instruct)**:
+   Mở terminal riêng:
+   ```bash
+   ollama run foundation-sec-8b-chat:latest
+   ```
+   *(Gõ `/bye` sau khi model đã nạp xong vào VRAM để giữ model luôn sẵn sàng).*
 
-```bash
-# Vulnbox hoặc bản sao bài trong đúng network namespace:
-python3 /root/DEF/check_contract.py \
-  --manifest /root/DEF/checker_probes.json --base-url http://127.0.0.1
+2. **Khởi động Live Radar Web UI**:
+   ```bash
+   cd /home/katsuo/gd1
+   ./start_dashboard.sh 8888
+   ```
 
-# Kiểm tra GET thật, không dùng curl -I (đó là HEAD):
-curl --max-time 5 -sS -o /dev/null -w '%{http_code}\n' \
-  'http://127.0.0.1/api/messages'
+3. **Mở trình duyệt truy cập: `http://localhost:8888`**:
+   - **Cột Checker SLA**: Giữ màu xanh lá (>95%). Nếu tụt đỏ ➡️ Kiểm tra ngay WAF có chặn nhầm format mới của Checker không.
+   - **Bảng 20 Team**: Nhìn xem đội nào (Team 1, 9, 13...) đang spam request nhiều nhất.
+   - **Threat Alerts**: Phát hiện dòng bôi đỏ (`cell.php`, `cmd`, `select`, `cat`).
+   - **Nút "Phân Tích"**: Bấm 1 click để AI giải thích đòn đánh và cách vá trong 10-15 giây.
 
-# Restore site từ đường backup script vừa in ra:
-bash /root/DEF/deploy_waf.sh --target /etc/nginx/sites-enabled/service.conf \
-  --restore /var/lib/gd1/waf-backups/<timestamp>.conf
-```
+---
 
-Sau deploy, xác nhận checker chính thức qua ít nhất một tick: cắm–đọc đúng flag, upload–download đúng bytes, phép toán đúng nội dung và thời gian. Probe từ localhost kiểm tra routing và contract nhưng **không giả lập danh tính checker**. Regression offline kiểm tra map miễn checker; kiểm thử Nginx thực tế từ nguồn checker là bước rehearsal bổ sung.
+### BƯỚC 5: XỬ LÝ 4 TÌNH HUỐNG THỰC CHIẾN & VÁ SÂU BACKEND (PHÚT 10+)
 
-Sao lưu site/full config ở `/var/lib/gd1/waf-backups/`, trạng thái sự cố ở `/var/lib/gd1/incident-*`, bản file trước recovery ở `/var/lib/gd1/recovery/`. Không `git reset --hard` trên live service để rollback. Đừng để backup trong webroot.
+WAF ở cổng 80 chỉ là "áo giáp ngoài". Bạn phải xử lý triệt để 4 case sau ở tầng ứng dụng:
 
-## 5. Vá sâu theo source ngân hàng
+#### 🔴 CASE 1: CỔNG BACKEND BỊ LỘ TRỰC TIẾP RA NGOÀI (BYPASS WAF)
+- **Triệu chứng**: Bạn đã cài WAF ở port 80, nhưng đối thủ vẫn lấy được flag vì chúng gửi request trực tiếp tới port `:8080` hoặc `:3000` hoặc `:8000`!
+- **Cách xử lý ngay lập tức**:
+  SSH vào Vulnbox, chạy iptables chỉ cho phép truy cập từ ngoài vào port `80` và `SSH`:
+  ```bash
+  # Chặn tất cả truy cập ngoài vào các port nội bộ:
+  iptables -A INPUT -p tcp -m multiport --dports 8080,3000,8000,5432 ! -s 127.0.0.1 -j DROP
+  ```
+  *(Hoặc mở file config của dịch vụ đó, đổi `0.0.0.0` thành `127.0.0.1`).*
 
-### PHP upload-log
+---
 
-- Lưu upload ngoài webroot, phục vụ bằng endpoint đọc dữ liệu; không `include` file do người dùng cung cấp.
-- Server quyết định đường lưu và tên file; kiểm tra traversal, overwrite, symlink và quota. Giữ filename/format mà checker cần qua metadata nếu hợp đồng yêu cầu.
-- Code/config không ghi được bởi UID phục vụ PHP. Storage không có handler PHP ở chính backend, kể cả truy cập trực tiếp :8080. `noexec` một mình không ngăn interpreter đọc file.
-- Whitelist đúng extension của bài và kiểm tra nội dung phù hợp; không mặc định chỉ `.txt/.log` nếu checker dùng `.csv/.json/.out`.
+#### 🔴 CASE 2: VÁ LỖ HỔNG UPLOAD WEBSHELL (PHP)
+- **Triệu chứng**: Đối thủ upload file `.php`, `.phtml`, `.phar` vào thư mục uploads/logs rồi gọi link thực thi lệnh OS (`cmd=cat /flag`).
+- **Cách xử lý tại Nginx**:
+  Đảm bảo trong cấu hình Nginx có directive cấm thực thi PHP trong thư mục upload:
+  ```nginx
+  location ~* /(logs|uploads|files)/.*\.ph {
+      deny all;
+      return 403;
+  }
+  ```
+- **Cách xử lý tại Backend PHP**:
+  - Di chuyển thư mục lưu trữ file ra ngoài webroot (ví dụ lưu tại `/tmp/storage/` hoặc `/var/storage/`).
+  - Phục vụ file thông qua endpoint download an toàn đọc dữ liệu (`readfile()`), không cho phép trình duyệt truy cập file trực tiếp.
 
-### PostgREST / PostgreSQL
+---
 
-- Tách role API khỏi owner/superuser/BYPASSRLS; giới hạn exposed schema và quyền SELECT/INSERT/UPDATE/DELETE/EXECUTE đúng contract.
-- Dùng RLS theo danh tính/capability đã xác thực, kiểm tra `USING` và `WITH CHECK`; rà soát views, functions SECURITY DEFINER và search_path.
-- Kiểm tra embedding qua chats, write `return=representation`, upsert và RPC. Edge không thấy hết ngữ nghĩa PostgREST.
-- Nếu checker và đối thủ đều anonymous, chỉ biết ID, regex ID không tạo được quyền riêng. Phải dựa vào cơ chế truy cập của bài và quyền DB, không đặt secret bất kỳ khiến checker không còn truy cập.
+#### 🔴 CASE 3: VÁ LỖ HỔNG DUMP CỜ CHAT (POSTGREST / POSTGRESQL)
+- **Triệu chứng**: Đối thủ gọi `GET /api/messages` hoặc bruteforce `id=eq.1, 2, 3...` hoặc dùng resource embedding `/api/chats?select=*,messages(*)` để hút cờ.
+- **Cách xử lý tại WAF**:
+  Rule WAF đã chặn truy vấn không có ID và chặn ký tự embedding `(`, `)`, `*` trong `select=`.
+- **Cách xử lý tại Database (Gốc rễ)**:
+  SSH vào Vulnbox và mở PostgreSQL:
+  ```bash
+  su - postgres -c "psql"
+  ```
+  Kiểm tra quyền của role API (thường là `anon` hoặc `authenticator`):
+  ```sql
+  -- Thu hồi quyền SELECT toàn bảng của anonymous:
+  REVOKE SELECT ON messages FROM anon;
+  
+  -- Hoặc bật Row Level Security (RLS) để chỉ xem được tin nhắn của chính mình:
+  ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+  ```
 
-### Deno mathsays
+---
 
-- Bỏ ghép input vào `sh -c`. Gọi binary trực tiếp với argv/stdin; dùng `--` nếu CLI hỗ trợ hoặc dùng thư viện.
-- Không xóa `$`, backtick, `;`, `*` hay ký tự toán học khỏi dữ liệu checker để chữa shell injection. Dữ liệu phải được giữ nguyên khi không đi qua shell.
-- Nếu có eval biểu thức, thay bằng parser giới hạn phép toán. Giới hạn output, execution time và concurrency theo rehearsal.
-- Thu hẹp quyền Deno/UID/mount/network; tránh `-A` và allow-run tùy ý. Đừng để một service đọc storage/flag/credentials của hai service còn lại nếu contract không cần.
+#### 🔴 CASE 4: VÁ LỖ HỔNG COMMAND INJECTION (DENO / NODEJS / MATHSAYS)
+- **Triệu chứng**: Đề thi nhận phép tính toán học nhưng backend ghép chuỗi vào shell: `sh -c "math $input"` ➡️ Bị chèn lệnh `; cat /flag` hoặc `$(cat /flag)`.
+- **Cách xử lý tại Backend Deno**:
+  Mở file mã nguồn `.js` hoặc `.ts` của dịch vụ:
+  ```javascript
+  // ❌ CODE NGUY HIỂM:
+  const p = Deno.run({ cmd: ["sh", "-c", `mathsays ${userInput}`] });
 
-Source PHP/Deno/SQL thật chưa có trong repo này; áp những thay đổi trên bản ngân hàng, thêm checksum của **bản đã vá và rehearsal** vào clean bundle. Template không tự thay source không nhìn thấy.
+  // ✅ CODE ĐÃ VÁ (Gọi trực tiếp binary bằng mảng arguments, KHÔNG QUA SHELL):
+  const p = Deno.run({ cmd: ["mathsays", "--", userInput] });
+  ```
+  *Khi không chạy qua `sh -c`, mọi ký tự `;`, `|`, `$()`, backtick đều chỉ được xem là dữ liệu chuỗi bình thường, triệt tiêu 100% command injection mà không làm sai phép toán của Checker!*
 
-## 6. Radar, PCAP và attack khi dịch vụ đã ổn
+---
 
-Radar bind `127.0.0.1:8888`, Ollama dùng URL/model trong config. URI/nhãn được render bằng textContent, không innerHTML; CSP hạn chế script. Chỉ một yêu cầu AI chạy cùng lúc, payload tối đa 4096 ký tự, timeout cấu hình. Không có chức năng tự thực thi hoặc apply lời khuyên LLM.
+## 📂 BẢNG TRA CỨU CÁC FILE & LỆNH QUAN TRỌNG
 
-Muốn chia sẻ Radar, ưu tiên SSH tunnel. Public bind cần `RADAR_TOKEN`, `RADAR_ALLOWED_HOSTS` và kênh mã hóa; HTTP Basic không mã hóa token. TEAM_IP_MAP dùng mapping BTC, không suy đoán team từ octet cuối. Khi chưa có mapping, UI ghi IP nguồn.
-
-```bash
-./pull_pcaps.sh
-cd ATK
-./one_click_atk.sh
-```
-
-Capture ring riêng, quyền 0700, mặc định khoảng 400 MB; sync chỉ công bố file sau khi kiểm tra metadata/size/magic và atomic rename. Không xóa source remote. Local giữ tối đa PCAP_LOCAL_FILES file do công cụ tạo; ring có thể mất lịch sử nếu chưa sync đủ nhanh. PCAP/log có thể chứa secrets/flag, chỉ dùng trong máy phân tích được bảo vệ.
-
-Phản công theo mẫu đã rehearsal: xác nhận payload trên bản sao → ghi nhận service/đội/tick → khai thác trong phạm vi giải → nộp qua adapter đã xác minh. Chọn một submission owner, giữ cache accepted riêng theo trận, kiểm tra retry/429/timeout; không bật nhiều farm cùng nộp một cờ. Target builder đã xét cả IP/port theo đội và dừng khi trỏ về service đội nhà; parser verdict dùng pattern có anchor, không xem HTTP 200 lỗi là accepted. Menu ATK và payload mẫu chưa thay cho target/adapter của BTC. Standalone chưa có durable pending queue: muốn retry chắc chắn khi flag không còn được exploit trả lại, dùng farm đã rehearsal hoặc bổ sung queue theo protocol. Set-target chỉ đồng bộ danh tính/cổng đội nhà, giữ cấu hình adapter và địa chỉ đối thủ riêng trong ATK/config.env.
-
-## 7. Kiểm chứng và nguồn kỹ thuật
-
-```bash
-./setup_ctf.sh verify
-python3 preflight.py --profile def
-bash -n push_def.sh DEF/deploy_waf.sh DEF/one_click_def.sh
-```
-
-Không có Nginx binary trong workspace hiện tại; regression offline không thay `nginx -t` và replay checker thật. `deploy_waf.sh` bắt buộc chạy syntax/probe tại Vulnbox và rollback khi thất bại.
-
-Tài liệu chính thức: [Nginx location/normalization](https://nginx.org/en/docs/http/ngx_http_core_module.html#location), [proxy_pass và URI](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_pass), [rate-limit key rỗng/dry-run](https://nginx.org/en/docs/http/ngx_http_limit_req_module.html), [PostgREST embedding](https://docs.postgrest.org/en/stable/references/api/resource_embedding.html), [PostgreSQL RLS](https://www.postgresql.org/docs/current/ddl-rowsecurity.html), [Deno permissions](https://docs.deno.com/runtime/reference/permissions/).
+| Lệnh | Ý nghĩa tác chiến | Nơi chạy |
+| :--- | :--- | :--- |
+| `ss -tulpn` | Tìm tất cả các port đang mở | Vulnbox |
+| `docker ps` | Kiểm tra port container đang map | Vulnbox |
+| `./set_target.sh` | 1 lệnh đổi IP, Port, Team ID toàn bộ hệ thống | Workstation |
+| `./push_def.sh` | 1-click đẩy WAF lên Vulnbox và reload nginx | Workstation |
+| `./ssh_box.sh` | Phím tắt SSH vào Vulnbox không cần gõ dài | Workstation |
+| `./start_dashboard.sh 8888` | Bật Radar Web UI giám sát 20 đội thời gian thực | Workstation |
+| `ollama run foundation-sec-8b-chat:latest` | Chat trực tiếp với AI an ninh mạng Cisco trong terminal | Workstation |
+| `./pull_pcaps.sh` | Kéo file PCAP về máy phân tích Tulip Forensics | Workstation |
