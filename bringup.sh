@@ -61,6 +61,7 @@ TEAMS_CIDR=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['tea
 TULIP_WEB_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['tulip']['web_port'])")
 OLLAMA_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['port'])")
 OLLAMA_HOST_CFG=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama'].get('host',''))")
+MOCK_VULNBOX_ENABLED=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(str(d.get('mock_vulnbox',{}).get('enabled',False)).lower())")
 LLM_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['llm_model'])")
 EMBED_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['embed_model'])")
 GPU_LAYERS=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['gpu_layers'])")
@@ -169,7 +170,12 @@ log "Building hub images..."
 docker compose build --quiet 2>&1 | tail -3 || warn "Build had warnings"
 
 log "Starting core services (redis, detection, watchdog, dashboard)..."
-docker compose up -d mock-vulnbox redis
+if [[ "$MOCK_VULNBOX_ENABLED" == "true" ]]; then
+    docker compose up -d mock-vulnbox redis
+else
+    log "mock_vulnbox.enabled=false — skipping the toy vulnerable app (real vulnbox mode)"
+    docker compose up -d redis
+fi
 sleep 3  # wait for redis; this also creates the ctf-net network
 
 # Tulip's Postgres always stays on THIS machine — probe for it using its own
@@ -209,8 +215,13 @@ ok "Hub services started"
 
 # ctf_proxy lives in its own compose project (separate repo, like Tulip) and
 # needs the ctf-net network this file just created, so it must come after.
+# It's currently only wired to front mock-vulnbox (see generators/gen-ctfproxy.py) —
+# fronting a REAL vulnbox needs a deploy step (iptables redirect on the vulnbox
+# itself) that doesn't exist yet. See docs/GOLIVE.md Phase 2.
 CTF_PROXY_DIR="$SCRIPT_DIR/offline-bundle/repos/ctf_proxy"
-if [[ -d "$CTF_PROXY_DIR" ]]; then
+if [[ "$MOCK_VULNBOX_ENABLED" != "true" ]]; then
+    warn "mock_vulnbox.enabled=false — skipping ctf_proxy (not yet wired for a real vulnbox, see docs/GOLIVE.md)"
+elif [[ -d "$CTF_PROXY_DIR" ]]; then
     log "Starting ctf_proxy (fronting mock-vulnbox at $VULNBOX_IP)..."
     (cd "$CTF_PROXY_DIR" && docker compose build --quiet 2>&1 | tail -3 && docker compose up -d) \
         || warn "ctf_proxy failed to start"
