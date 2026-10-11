@@ -16,6 +16,7 @@ Safety:
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -93,7 +94,7 @@ IMPORTANT: You MUST respond with ONLY valid JSON matching this exact schema:
 Do not include any explanation outside the JSON. If unknown, use null for fields."""
 
 def build_analysis_prompt(content: str, context: str = "") -> str:
-    prompt = f"Analyze this CTF network flow/log:\n\n```\n{content[:4000]}\n```"
+    prompt = f"Analyze this CTF network flow/log:\n\n```\n{content[:6000]}\n```"
     if context:
         prompt += f"\n\nAdditional context:\n{context[:1000]}"
     return prompt
@@ -155,6 +156,42 @@ def parse_ioc_json(raw: str) -> dict:
             pass
     raise IocParseError(raw[:500])
 
+
+IOC_KEYS = {"attacker_ip", "exploited_endpoint", "technique", "mitre_attack", "payload_summary",
+            "severity", "flag_exfiltrated", "recommended_action", "raw_ioc_tags"}
+
+
+def looks_like_ioc(d: dict) -> bool:
+    """The small model sometimes returns the input event back as 'JSON'."""
+    return isinstance(d, dict) and len(IOC_KEYS & d.keys()) >= 3
+
+
+def flow_transcript(flow: dict) -> str:
+    """Readable request/response text for the model (instead of escaped JSON,
+    which wasted most of the context window and cut the payload off)."""
+    head = (f"Flow {flow.get('id')}  {flow.get('ip_src')}:{flow.get('port_src')} -> "
+            f"{flow.get('ip_dst')}:{flow.get('port_dst')}  time {flow.get('time')}  tags {flow.get('tags')}")
+    parts = [head]
+    for it in flow.get("items") or []:
+        who = "CLIENT -> SERVER" if it.get("direction") == "c" else "SERVER -> CLIENT"
+        parts.append(f"--- {who} ---\n{(it.get('data') or '')[:1500]}")
+    return "\n".join(parts)
+
+
+_IP = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def verify_grounding(ioc: dict, content: str, grounded_on: str) -> dict:
+    """Cheap hallucination check: every IP the model mentions must appear in
+    what it was given. Shown to the operator next to the answer."""
+    out_ips = set(_IP.findall(json.dumps(ioc)))
+    invented = sorted(ip for ip in out_ips if ip not in content)
+    note = {"flow": "model read the real Tulip flow — its CONCLUSION can still be wrong, check the flow yourself",
+            "log": "based ONLY on the alert text (no flow data) — weak evidence",
+            "none": "flow could not be fetched — the model saw almost nothing"}[grounded_on]
+    return {"evidence": grounded_on, "note": note, "invented_ips": invented,
+            "grounded": not invented and grounded_on == "flow"}
+
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 app = FastAPI(
     title="CTF IOC Brain",
@@ -193,43 +230,51 @@ async def analyze(req: AnalyzeRequest):
 
     content = ""
     flow_id = req.flow_id
+    grounded_on = "log"
 
     if req.flow_id:
         flow = await fetch_flow_from_mcp(req.flow_id)
         if flow:
-            content = json.dumps(flow, indent=2, default=str)
+            content = flow_transcript(flow)
+            grounded_on = "flow"
         else:
-            # Fall back: use flow_id as context
             content = f"Flow ID: {req.flow_id} (could not fetch from Tulip via MCP)"
+            grounded_on = "none"
 
     if req.log_snippet:
-        content = req.log_snippet
-        if req.flow_id:
-            content = f"Flow ID: {req.flow_id}\n\n{req.log_snippet}"
+        # Keep the flow (the real evidence) first; the event that pointed us
+        # at it is extra context, not a replacement.
+        content = (content + "\n\nRelated alert:\n" + req.log_snippet) if grounded_on == "flow" else req.log_snippet
 
     prompt = build_analysis_prompt(content, req.context or "")
     raw_response, latency = await call_llm_on_demand(prompt)
+    ioc = None
     try:
         ioc = parse_ioc_json(raw_response)
+        if not looks_like_ioc(ioc):
+            raise IocParseError("not the IOC schema (model echoed the input?)")
     except IocParseError:
-        log.warning("First LLM response wasn't valid JSON — retrying once")
+        log.warning("First LLM response wasn't schema-valid JSON — retrying once")
         retry_response, retry_latency = await call_llm_on_demand(
             prompt,
             retry_notice=(
-                "Your previous response was not valid JSON. Respond with "
-                "ONLY the JSON object matching the schema above — no other "
-                "text, no explanation, no markdown."
+                "Your previous response did not follow the schema (it must not "
+                "copy the input). Respond with ONLY the JSON object with the "
+                "keys from the schema above — no other text, no markdown."
             ),
         )
         latency += retry_latency
         try:
             ioc = parse_ioc_json(retry_response)
+            if not looks_like_ioc(ioc):
+                raise IocParseError(retry_response[:500])
         except IocParseError as e:
             ioc = {
-                "analysis_notes": "LLM response was not valid JSON after retry",
+                "analysis_notes": "LLM did not return a usable analysis after retry — ignore this result",
                 "raw_response": str(e),
                 "confidence": "LOW",
             }
+    ioc["_check"] = verify_grounding(ioc, content, grounded_on)
 
     # Push IOC to Redis for dashboard consumption
     rdb = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)

@@ -1,0 +1,8 @@
+# 11 — Flag exfiltration patterns. ALERT ONLY.
+# Flag regex in this arena: [A-Z0-9]{31}=  — edit the class below if the organizers change it (CONFIG tab -> Flag regex).
+# The checker normally reads ONE flag per request. Several in one response = someone dumping data.
+alert http any any -> any any (msg:"LIB EXFIL 3+ flags in one HTTP response (mass dump)"; flow:to_client,established; http.response_body; pcre:"/([A-Z0-9]{31}=[\s\S]{0,4000}){3}/"; classtype:successful-admin; sid:9211001; rev:1; priority:1;)
+alert tcp any any -> any any (msg:"LIB EXFIL 3+ flags in one TCP payload (non-HTTP service)"; flow:established; pcre:"/([A-Z0-9]{31}=[\s\S]{0,2000}){3}/"; classtype:successful-admin; sid:9211002; rev:1; priority:1;)
+alert http any any -> any any (msg:"LIB EXFIL list/dump endpoint with huge limit (limit=1000 / per_page=9999 / select=*)"; flow:to_server,established; http.uri; pcre:"/[?&](limit|per_page|page_size|size|count|max)=\d{4,}|[?&]select=\*/i"; classtype:web-application-attack; sid:9211003; rev:1; priority:2;)
+alert http any any -> any any (msg:"LIB EXFIL IDOR walk — 30 requests to numeric id paths in 10s from one source"; flow:to_server,established; http.uri; pcre:"/\/(\d{1,9})(\/|\?|$)/"; threshold:type both, track by_src, count 30, seconds 10; classtype:web-application-attack; sid:9211004; rev:1; priority:2;)
+alert http any any -> any any (msg:"LIB HONEYTOKEN requested"; flow:to_server,established; http.request_line; content:"HONEYTOKEN"; nocase; classtype:successful-admin; sid:9211005; rev:1; priority:1;)

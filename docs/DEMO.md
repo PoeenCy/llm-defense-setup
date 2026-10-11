@@ -186,7 +186,7 @@ mkdir -p /tmp/demo_fallback
   | tee /tmp/demo_fallback/ctf_proxy_pass.log
 
 # Log detection PASS
-curl -s http://localhost:9999/alerts/recent 2>&1 \
+curl -s http://localhost:9998/alerts/recent 2>&1 \
   | tee /tmp/demo_fallback/detection_pass.log
 
 # Log harness PASS
@@ -282,7 +282,7 @@ Kết quả mong đợi: `{"status":"ok","token":"..."}` + `HTTP 200`.
 **Inject flag-out:**
 
 ```bash
-time curl -s -X POST http://localhost:9999/test/inject-flag \
+time curl -s -X POST http://localhost:9998/test/inject-flag \
   | python3 -m json.tool
 ```
 
@@ -298,7 +298,7 @@ real    0m0.021s
 **Kiểm tra alert:**
 
 ```bash
-curl -s http://localhost:9999/alerts/recent \
+curl -s http://localhost:9998/alerts/recent \
   | python3 -m json.tool \
   | grep -A5 '"type": "flag-out"'
 ```

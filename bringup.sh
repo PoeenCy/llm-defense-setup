@@ -61,6 +61,7 @@ TEAMS_CIDR=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['tea
 TULIP_WEB_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['tulip']['web_port'])")
 OLLAMA_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['port'])")
 OLLAMA_HOST_CFG=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama'].get('host',''))")
+BIND_IP=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['monitor_host'].get('bind_ip','127.0.0.1'))")
 MOCK_VULNBOX_ENABLED=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(str(d.get('mock_vulnbox',{}).get('enabled',False)).lower())")
 LLM_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['llm_model'])")
 EMBED_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['embed_model'])")
@@ -123,7 +124,7 @@ header "Step 4: Export environment"
 export TEAM_ID VULNBOX_IP MONITOR_IP TEAMS_CIDR
 export FLAG_REGEX HONEYTOKEN_FLAG HONEYTOKEN_PORT HONEYTOKEN_PORT
 export DASHBOARD_PORT ALERT_QUEUE_PORT IOC_API_PORT
-export TULIP_WEB_PORT
+export TULIP_WEB_PORT BIND_IP
 export OLLAMA_PORT LLM_MODEL EMBED_MODEL GPU_LAYERS
 export ANYTHINGLLM_PORT
 
@@ -151,13 +152,30 @@ header "Step 5: Start Tulip stack"
 if [[ -d "$TULIP_DIR" ]]; then
     log "Building Tulip images (first run may take 5-10 min)..."
     cd "$TULIP_DIR"
-    docker compose build --quiet 2>&1 | tail -3 || warn "Tulip build had warnings"
+    # docker-compose-suricata.yml is a full superset of docker-compose.yml
+    # (same services + suricata, enricher wired to eve.json). Plain
+    # docker-compose.yml alone leaves Suricata OFF and the enricher idle.
+    TULIP_COMPOSE="-f docker-compose.yml"
+    if [[ -f docker-compose-suricata.yml && -d "$SCRIPT_DIR/suricata/lib/rules" ]]; then
+        TULIP_COMPOSE="-f docker-compose.yml -f docker-compose-suricata.yml"
+        log "Suricata overlay enabled (rules: suricata/lib/rules/)"
+    else
+        warn "Suricata overlay or suricata/lib/rules missing — starting Tulip WITHOUT Suricata"
+    fi
+    docker compose $TULIP_COMPOSE build --quiet 2>&1 | tail -3 || warn "Tulip build had warnings"
     log "Starting Tulip..."
-    docker compose up -d 2>&1 | tail -5
+    docker compose $TULIP_COMPOSE up -d 2>&1 | tail -5
     cd "$SCRIPT_DIR"
     ok "Tulip started"
 else
     warn "Tulip repo missing — skipping Tulip"
+fi
+# dashboard + mcp-tulip join Tulip's internal network. If Tulip didn't come up
+# (repo missing / failed), create an empty network of that name so those two
+# still start — they degrade (no flow lookups) instead of refusing to run.
+if ! docker network inspect tulip_internal >/dev/null 2>&1; then
+    warn "Tulip network tulip_internal not found — creating an empty one so the dashboard can still start"
+    docker network create tulip_internal >/dev/null
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -178,15 +196,16 @@ else
 fi
 sleep 3  # wait for redis; this also creates the ctf-net network
 
-# Tulip's Postgres always stays on THIS machine — probe for it using its own
-# port (5433), regardless of where Ollama ends up (see below). This also
-# supplies the fallback gateway for Ollama when ollama.host isn't set.
+# Under podman, containers reach host services only via a bridge gateway that
+# actually routes back to the host. The only host service containers still
+# need is a local Ollama (Tulip's Postgres is reached over Tulip's own docker
+# network now, not a host port), so probe with Ollama's port.
 if [[ "$PODMAN_BACKED" == true && -z "${DOCKER_HOST_GATEWAY:-}" ]]; then
     log "Probing bridge gateways for one that actually routes to the host..."
     CANDIDATES="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null) 172.17.0.1 10.88.0.1"
     for GW in $CANDIDATES; do
         [[ -z "$GW" ]] && continue
-        if docker run --rm --network ctf-net busybox sh -c "nc -z -w2 $GW $MCP_PG_PORT" &>/dev/null; then
+        if docker run --rm --network ctf-net busybox sh -c "nc -z -w2 $GW $OLLAMA_PORT" &>/dev/null; then
             warn "Using bridge gateway: $GW (set DOCKER_HOST_GATEWAY to override next time)"
             export DOCKER_HOST_GATEWAY="$GW"
             break
@@ -194,7 +213,7 @@ if [[ "$PODMAN_BACKED" == true && -z "${DOCKER_HOST_GATEWAY:-}" ]]; then
     done
     [[ -z "${DOCKER_HOST_GATEWAY:-}" ]] && warn "No working bridge gateway found — mcp-tulip may be unreachable"
 fi
-export MCP_POSTGRES_RO_URI="postgresql://${MCP_PG_ROLE}@${DOCKER_HOST_GATEWAY:-host.docker.internal}:${MCP_PG_PORT}/${MCP_PG_DB}"
+export MCP_POSTGRES_RO_URI="postgresql://${MCP_PG_ROLE}@timescale:5432/${MCP_PG_DB}"
 
 # Ollama: if services.json's ollama.host is set, it's on a DEDICATED machine
 # (see docs/REMOTE_LLM.md) — use that LAN IP directly, no podman gateway
@@ -206,6 +225,23 @@ if [[ -n "$OLLAMA_HOST_CFG" ]]; then
 else
     export OLLAMA_RESOLVED_HOST="${DOCKER_HOST_GATEWAY:-host.docker.internal}"
 fi
+
+# Persist every value compose interpolates into ./.env (compose reads it
+# automatically). Without this, any later `docker compose up -d <svc>` — by
+# hand, or a Restart from the dashboard — would start containers with EMPTY
+# config (e.g. detection crashes on an empty TEAMS_CIDR).
+{
+    echo "# AUTO-GENERATED by bringup.sh from services.json — re-run bringup.sh instead of editing"
+    for v in TEAM_ID VULNBOX_IP MONITOR_IP TEAMS_CIDR FLAG_REGEX HONEYTOKEN_FLAG HONEYTOKEN_PORT \
+             DASHBOARD_PORT ALERT_QUEUE_PORT IOC_API_PORT TULIP_WEB_PORT BIND_IP \
+             OLLAMA_PORT LLM_MODEL EMBED_MODEL GPU_LAYERS ANYTHINGLLM_PORT \
+             MCP_POSTGRES_RO_URI OLLAMA_RESOLVED_HOST DOCKER_HOST_GATEWAY; do
+        val="${!v:-}"
+        [[ "$val" == *"'"* ]] && die "$v contains a single quote, which .env can't hold literally: $val"
+        printf "%s='%s'\n" "$v" "$val"
+    done
+} > "$SCRIPT_DIR/.env"
+ok "Compose environment saved to .env (manual 'docker compose up -d <svc>' now gets the same config)"
 
 docker compose up -d detection watchdog ml-fingerprint mcp-tulip
 sleep 2
@@ -220,7 +256,7 @@ ok "Hub services started"
 # itself) that doesn't exist yet. See docs/GOLIVE.md Phase 2.
 CTF_PROXY_DIR="$SCRIPT_DIR/offline-bundle/repos/ctf_proxy"
 if [[ "$MOCK_VULNBOX_ENABLED" != "true" ]]; then
-    warn "mock_vulnbox.enabled=false — skipping ctf_proxy (not yet wired for a real vulnbox, see docs/GOLIVE.md)"
+    log "mock_vulnbox.enabled=false — local mock ctf_proxy skipped; the real one is deployed on the vulnbox by deploy-all.sh (vulnbox-deploy/deploy-ctfproxy.sh)"
 elif [[ -d "$CTF_PROXY_DIR" ]]; then
     log "Starting ctf_proxy (fronting mock-vulnbox at $VULNBOX_IP)..."
     (cd "$CTF_PROXY_DIR" && docker compose build --quiet 2>&1 | tail -3 && docker compose up -d) \
@@ -273,16 +309,24 @@ check_service() {
     fi
 }
 
-check_service "Redis"        "http://127.0.0.1:$ALERT_QUEUE_PORT"     2>/dev/null || true
-check_service "Detection"    "http://127.0.0.1:$HONEYTOKEN_PORT/health"
-check_service "Dashboard"    "http://127.0.0.1:$DASHBOARD_PORT/health"
-check_service "IOC Brain"    "http://127.0.0.1:$IOC_API_PORT/health"
+# Redis speaks RESP, not HTTP — ping it properly instead of curling it.
+if docker exec ctf-redis redis-cli ping 2>/dev/null | grep -q PONG; then
+    ok "Redis: UP (127.0.0.1:$ALERT_QUEUE_PORT)"
+else
+    warn "Redis: NOT responding — docker logs ctf-redis"
+fi
+# Health checks are informational only — a slow/down service here (especially
+# AnythingLLM, which boots slowly on first run) must never abort the script
+# under `set -e`, or the rest of bringup (and deploy-all.sh after it) never runs.
+check_service "Detection"    "http://127.0.0.1:$HONEYTOKEN_PORT/health" || true
+check_service "Dashboard"    "http://127.0.0.1:$DASHBOARD_PORT/health" || true
+check_service "IOC Brain"    "http://127.0.0.1:$IOC_API_PORT/health" || true
 
 if [[ -d "$TULIP_DIR" ]]; then
-    check_service "Tulip UI" "http://127.0.0.1:$TULIP_WEB_PORT"
+    check_service "Tulip UI" "http://127.0.0.1:$TULIP_WEB_PORT" || true
 fi
 
-check_service "AnythingLLM" "http://127.0.0.1:$ANYTHINGLLM_PORT"
+check_service "AnythingLLM" "http://127.0.0.1:$ANYTHINGLLM_PORT" || true
 
 # ═══════════════════════════════════════════════════════════════
 # 9. Summary
@@ -308,5 +352,5 @@ log "  1. Open dashboard: xdg-open http://localhost:$DASHBOARD_PORT"
 log "  2. Deploy vulnbox capture: bash vulnbox-deploy/deploy-capture.sh"
 log "  3. Deploy OS watchdog:     bash vulnbox-deploy/deploy-os-watchdog.sh"
 log "  4. Deploy honeytoken:      bash vulnbox-deploy/deploy-honeytoken.sh"
-log "  5. Test detection:         curl -X POST http://localhost:$HONEYTOKEN_PORT/test/inject-flag"
+log "  5. Test detection:         curl -X POST http://localhost:9998/test/inject-flag  (admin port, loopback only)"
 log "  6. Teardown when done:     bash teardown.sh"

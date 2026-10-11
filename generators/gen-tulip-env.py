@@ -17,7 +17,9 @@ flag_regex   = cfg["flag"]["regex"]
 vulnbox_ip   = cfg["vulnbox"]["ip"]
 vulnbox_port = cfg["vulnbox"]["pcap_broker_port"]
 team_id      = cfg["team_id"]
+bind_ip      = cfg.get("monitor_host", {}).get("bind_ip", "127.0.0.1")
 mock_vulnbox_enabled = cfg.get("mock_vulnbox", {}).get("enabled", False)
+live_pcap_broker = cfg.get("vulnbox", {}).get("live_pcap_broker", False)
 traffic_dir  = os.path.join(PROJECT_ROOT, "traffic")
 suricata_dir = os.path.join(PROJECT_ROOT, "suricata")
 
@@ -27,17 +29,24 @@ os.makedirs(os.path.join(suricata_dir, "etc"), exist_ok=True)
 os.makedirs(os.path.join(suricata_dir, "lib"), exist_ok=True)
 
 # Build BPF filter from services
-service_ports = [str(s["port"]) for s in cfg["services"]]
+# capture_port, if set, is the port actually visible at the capture point
+# (e.g. a docker bridge sees the post-NAT internal port, not the public
+# listen port) — falls back to "port" for a traditional vulnbox with no NAT
+# between the capture point and the service.
+service_ports = [str(s.get("capture_port", s["port"])) for s in cfg["services"]]
 bpf = " or ".join(f"port {p}" for p in service_ports) if service_ports else ""
 
 # Generate tick start as now (will be overridden at match start)
 tick_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-# mock_vulnbox mode has no real pcap-broker to stream from — use directory-
-# watch mode (empty PCAP_OVER_IP) so Tulip picks up pcaps dropped into
-# traffic/ instead of retrying a dead connection forever. Real competition
-# mode (mock_vulnbox.enabled=false) streams live from the vulnbox as before.
-pcap_over_ip = "" if mock_vulnbox_enabled else f"host.docker.internal:{vulnbox_port}"
+# Directory-watch mode (empty PCAP_OVER_IP) is the default: Tulip picks up
+# pcaps dropped into traffic/ instead of needing a live PCAP-over-IP broker
+# running on the vulnbox. This covers both mock-vulnbox testing AND a real
+# vulnbox fed via a pull-based capture script (vulnbox-deploy/deploy-capture-
+# pull.sh) that scp/rsyncs rotated pcaps into traffic/ — set
+# vulnbox.live_pcap_broker=true only if you actually have a PCAP-over-IP
+# broker (e.g. fox-it/pcap-broker) running and reachable at vulnbox_port.
+pcap_over_ip = f"host.docker.internal:{vulnbox_port}" if live_pcap_broker else ""
 
 env_content = f"""##############################
 # Tulip config — AUTO-GENERATED from services.json
@@ -45,6 +54,10 @@ env_content = f"""##############################
 ##############################
 
 TIMESCALE="postgres://tulip@timescale:5432/tulip"
+
+# Interface Tulip's published ports (web UI, postgres) bind to — see
+# services.json monitor_host.bind_ip
+BIND_IP="{bind_ip}"
 
 TRAFFIC_DIR_HOST="{traffic_dir}"
 TRAFFIC_DIR_DOCKER="/traffic"
@@ -71,9 +84,10 @@ TEAM_ID="{team_id}"
 PCAP_OVER_IP="{pcap_over_ip}"
 
 ##############################
-# DUMP_PCAPS — save pcaps for offline analysis
+# DUMP_PCAPS — off: in directory-watch mode the pcaps already ARE on disk, and
+# /traffic is mounted read-only, so dumping only spams "read-only file system"
 ##############################
-DUMP_PCAPS="/traffic"
+DUMP_PCAPS=""
 DUMP_PCAPS_INTERVAL="1m"
 DUMP_PCAPS_FILENAME="2006-01-02_15-04-05.pcap"
 
@@ -92,6 +106,20 @@ FLAG_VALIDATOR_TYPE=
 FLAG_VALIDATOR_TEAM=42
 """
 
+# Upstream Tulip compose files publish "3000:3000" / "5433:5432" on every
+# interface. Rewrite them (idempotently) to bind ${BIND_IP} instead, every run,
+# so a fresh clone of the upstream repo can't silently re-expose them.
+import re
+for fname in ("docker-compose.yml", "docker-compose-suricata.yml"):
+    fp = os.path.join(TULIP_DIR, fname)
+    if not os.path.exists(fp):
+        continue
+    txt = open(fp).read()
+    patched = re.sub(r'(- *")(3000:3000|5433:5432)(")', r'\1${BIND_IP:-127.0.0.1}:\2\3', txt)
+    if patched != txt:
+        open(fp, "w").write(patched)
+        print(f"[gen-tulip-env] Bound published ports to BIND_IP in {fname}")
+
 env_path = os.path.join(TULIP_DIR, ".env")
 with open(env_path, "w") as f:
     f.write(env_content)
@@ -99,6 +127,7 @@ with open(env_path, "w") as f:
 print(f"[gen-tulip-env] Written: {env_path}")
 print(f"  FLAG_REGEX = {flag_regex}")
 print(f"  VM_IP      = {vulnbox_ip}")
-print(f"  PCAP_OVER_IP = {pcap_over_ip or '(empty — directory-watch mode, mock_vulnbox.enabled=true)'}")
+print(f"  PCAP_OVER_IP = {pcap_over_ip or '(empty — directory-watch mode, vulnbox.live_pcap_broker=false)'}")
 print(f"  TRAFFIC_DIR_HOST = {traffic_dir}")
 print(f"  BPF = {bpf}")
+print(f"  BIND_IP = {bind_ip}")

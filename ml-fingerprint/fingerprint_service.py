@@ -47,14 +47,19 @@ log = logging.getLogger("ml-fingerprint")
 REDIS_HOST   = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT   = int(os.environ.get("REDIS_PORT", 6379))
 TRAFFIC_DIR  = Path(os.environ.get("TRAFFIC_DIR", "/traffic"))
-TEAMS_CIDR   = os.environ.get("TEAMS_CIDR", "10.60.0.0/16")
+# Optional extra source filter. Empty = fingerprint EVERY client of our
+# services (the old default used TEAMS_CIDR, which in this config is our own
+# team subnet — so no attacker traffic was ever looked at).
+SOURCE_CIDR  = os.environ.get("ML_SOURCE_CIDR", "")
+VULNBOX_IP   = os.environ.get("VULNBOX_IP", "")
 MONITOR_IP   = os.environ.get("MONITOR_IP", "10.0.0.50")
 
 CONFIG_PATH = Path(os.environ.get("CONFIG", "/app/services.json"))
 if CONFIG_PATH.exists():
     with open(CONFIG_PATH) as f:
         CFG = json.load(f)
-    SERVICE_PORTS = {s["port"] for s in CFG.get("services", [])}
+    SERVICE_PORTS = {int(p) for s in CFG.get("services", [])
+                     for p in (s.get("port"), s.get("capture_port"), s.get("internal_port")) if p}
 else:
     CFG = {}
     SERVICE_PORTS = set()
@@ -87,11 +92,12 @@ def cidr_to_range(cidr: str) -> Tuple[int, int]:
     net_int = struct.unpack("!I", socket.inet_aton(net))[0] & mask
     return net_int, mask
 
-TEAMS_NET, TEAMS_MASK = cidr_to_range(TEAMS_CIDR)
+SRC_NET, SRC_MASK = cidr_to_range(SOURCE_CIDR) if SOURCE_CIDR else (0, 0)
+OWN_IPS = {ip for ip in (VULNBOX_IP, MONITOR_IP) if ip}
 
 def ip_in_cidr(ip_bytes: bytes) -> bool:
     ip_int = struct.unpack("!I", ip_bytes)[0]
-    return (ip_int & TEAMS_MASK) == TEAMS_NET
+    return (ip_int & SRC_MASK) == SRC_NET
 
 try:
     import dpkt
@@ -171,6 +177,8 @@ class BotFingerprinter(threading.Thread):
                         if tcp.dport not in SERVICE_PORTS:
                             continue  # only our monitored services
                         src_ip = socket.inet_ntoa(ip.src)
+                        if src_ip in OWN_IPS:
+                            continue
                         key    = f"{src_ip}:{tcp.dport}"
                         if key not in self._flows:
                             self._flows[key] = FlowRecord(src_ip, tcp.dport)
@@ -181,9 +189,21 @@ class BotFingerprinter(threading.Thread):
         except Exception as e:
             log.debug("Error parsing %s: %s", pcap_path, e)
 
+    def _status(self, state: str, **extra):
+        """Visible state for the dashboard / health check (Redis key ml_status)."""
+        try:
+            self._rdb.set("ml_status", json.dumps({
+                "state": state, "tick": self._tick, "warmup_ticks": N_WARMUP_TICKS,
+                "tick_window_s": TICK_WINDOW_SEC, "service_ports": sorted(SERVICE_PORTS),
+                "observations": len(self._observations), "ts": datetime.now(timezone.utc).isoformat(), **extra,
+            }), ex=TICK_WINDOW_SEC * 3)
+        except Exception:
+            pass
+
     def _analyze_tick(self):
         """At end of each tick window, cluster flows and emit hints for deviants."""
         if not self._flows:
+            self._status("idle", note="no client traffic to service ports in the last window")
             return
 
         # Build feature matrix from completed flows
@@ -210,6 +230,7 @@ class BotFingerprinter(threading.Thread):
         # Only start labeling after warmup
         if self._tick < N_WARMUP_TICKS:
             log.info("Warmup phase (%d/%d ticks)", self._tick, N_WARMUP_TICKS)
+            self._status("warmup", flows_last_tick=len(new_vecs))
             self._flows.clear()
             return
 
@@ -240,6 +261,7 @@ class BotFingerprinter(threading.Thread):
             return
 
         # For each new flow, find nearest cluster
+        deviants = 0
         for i, (key, vec_scaled) in enumerate(zip(flow_keys, new_scaled)):
             flow = self._flows.get(key)
             if flow is None:
@@ -256,6 +278,7 @@ class BotFingerprinter(threading.Thread):
             label = "bot-like" if dist < DBSCAN_EPS * 1.5 else "deviant"
 
             if label == "deviant":
+                deviants += 1
                 fv = self._flows[key].to_feature_vector()
                 push_hint(self._rdb, {
                     "message": (
@@ -287,6 +310,8 @@ class BotFingerprinter(threading.Thread):
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }))
 
+        self._status("active", flows_last_tick=len(new_vecs), deviants_last_tick=deviants,
+                     bot_cluster_size=int(label_counts.get(dominant_label, 0)))
         log.info("Tick %d analysis done. Dominant cluster: #%d (%d members)",
                  self._tick, dominant_label, label_counts.get(dominant_label, 0))
 
@@ -296,9 +321,15 @@ class BotFingerprinter(threading.Thread):
     def run(self):
         log.info("BotFingerprinter started. Traffic dir: %s", TRAFFIC_DIR)
         log.info("Service ports monitored: %s", SERVICE_PORTS)
-        log.info("Teams CIDR: %s (inbound traffic from this range will be fingerprinted)", TEAMS_CIDR)
+        log.info("Source filter: %s (excluding own IPs %s)", SOURCE_CIDR or "all clients", OWN_IPS)
         log.info("Warmup: %d ticks (~%ds each) before labeling begins", N_WARMUP_TICKS, TICK_WINDOW_SEC)
 
+        # Old pcaps on disk are history, not this tick: skip them so the first
+        # window isn't one giant blob of hours of traffic.
+        if TRAFFIC_DIR.exists():
+            cutoff = time.time() - TICK_WINDOW_SEC
+            self._seen_pcaps |= {p.name for p in TRAFFIC_DIR.glob("*.pcap") if p.stat().st_mtime < cutoff}
+        self._status("starting")
         tick_start = time.time()
 
         while True:
@@ -329,7 +360,11 @@ if __name__ == "__main__":
             if self.path == "/health":
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(b'{"status":"ok","service":"ml-fingerprint"}')
+                try:
+                    st = fp._rdb.get("ml_status") or "{}"
+                except Exception:
+                    st = "{}"
+                self.wfile.write(('{"status":"ok","service":"ml-fingerprint","ml":' + st + '}').encode())
         def log_message(self, *args): pass
 
     with socketserver.TCPServer(("0.0.0.0", 5002), Handler) as httpd:

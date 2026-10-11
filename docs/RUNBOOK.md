@@ -6,7 +6,25 @@
 
 ---
 
-## Quick-Start (you have internet)
+## Quick-Start — the 1-click
+
+```bash
+bash deploy-all.sh
+```
+Runs, in order: config validation → local stack (Tulip/detection/dashboard/
+watchdog) → remote capture (auto-detects the external interface, no
+docker-bridge name needed) → ctf_proxy (only if `ctf_proxy.insertion` in
+`services.json` is filled in and every precondition re-verifies over SSH —
+otherwise skips cleanly and you stay in monitor-only mode) → a final
+`health-check.sh` report. **Safe to re-run any time** — every step is
+idempotent, nothing here deletes data.
+
+If the vulnbox is unreachable, the local stack still comes up fine (steps 3-4
+log a clear warning and continue); you'll just have no live traffic until
+that's fixed. See `docs/RUNBOOK.md` → Troubleshooting → "Always start here"
+(`health-check.sh`) for diagnosing what's actually wrong.
+
+### First-time setup (before you can run deploy-all.sh at all)
 
 ```bash
 # 1. Edit the central config
@@ -17,12 +35,9 @@ bash validate-config.sh
 
 # 3. Bundle everything for offline use
 bash pull-and-save.sh       # ~20-40 min, downloads ~15-25 GB
-
-# 4. Bring everything up
-bash bringup.sh
 ```
 
-## Quick-Start (air-gapped machine, competition day)
+### Air-gapped machine, competition day
 
 ```bash
 # 1. Copy offline-bundle/ from prep machine (USB/LAN transfer)
@@ -31,8 +46,8 @@ rsync -a offline-bundle/ /path/to/Setup_tool/offline-bundle/
 # 2. Restore from bundle (zero network calls)
 bash offline-restore.sh
 
-# 3. Bring up
-bash bringup.sh --offline
+# 3. 1-click bring-up
+bash deploy-all.sh
 ```
 
 ---
@@ -141,7 +156,7 @@ curl --connect-timeout 3 https://ollama.ai
 
 ```bash
 # Inject a fake flag-out alert
-curl -X POST http://localhost:9999/test/inject-flag
+curl -X POST http://localhost:9998/test/inject-flag
 # Expect: 200 OK + alert appears on dashboard within 2s
 ```
 
@@ -186,28 +201,131 @@ sudo iptables -D INPUT -p tcp --dport 9001 -j REJECT
 
 ## Deploying Vulnbox-Side Components
 
-> Run these from the monitor machine, once you have SSH access to the vulnbox.
+> **This is what we actually run in practice — NOT the pcap-broker design described
+> elsewhere in older docs.** `pcap_broker_port` in services.json is unused; real
+> capture goes over SSH + tcpdump + rsync pull, because the vulnbox here is a
+> Docker container on a shared Azure host we don't control, reached only via
+> `ssh dfcd-vbox` (an alias in `~/.ssh/config`, ProxyJump through the gameserver).
+
+### Step 0 — confirm you can even reach it
 
 ```bash
-# 1. Deploy pcap capture (tcpdump + pcap-broker)
-bash vulnbox-deploy/deploy-capture.sh
+ssh dfcd-vbox "echo OK"
+```
+If this times out ("Connection timed out during banner exchange"), the Azure VMs
+are probably stopped/deallocated. **You (or the organizer) must start them from
+the Azure portal/CLI — Claude/no tool here can do that.** Nothing below will work
+until this succeeds.
 
-# 2. Deploy OS integrity watchdog agent
+### Step 1 — start capture + pull loop (one script, idempotent)
+
+```bash
+bash vulnbox-deploy/deploy-capture-pull.sh
+```
+This SSHes in, starts `tcpdump -Z root -i <docker_bridge> -w ... -G 30` on the
+vulnbox-host (writing 30s-rotated pcap files to `/tmp/ctf-capture-<pid>/` —
+**not persistent across a VM reboot**, must be redone every time the VM restarts),
+then loops locally pulling files back into `./traffic/` every 15s via rsync.
+
+**Run it as a long-lived watch** (e.g. the Monitor tool, or a terminal you leave
+open) — if it stops, pcaps pile up on the remote side instead of reaching Tulip,
+and nothing errors loudly to tell you.
+
+### Step 2 — deploy ctf_proxy in front of the real service (optional, for blocking)
+
+See **"Deploying ctf_proxy Against a Real Vulnbox"** below — this is a separate,
+riskier step (touches the live service's port binding) and is not part of basic
+monitoring/capture.
+
+### Step 3 — OS watchdog / honeytoken (same pattern as before, if you have root on the vulnbox)
+
+```bash
 bash vulnbox-deploy/deploy-os-watchdog.sh
-
-# 3. Deploy honeytoken traps
 bash vulnbox-deploy/deploy-honeytoken.sh
 ```
 
-All scripts read parameters from `services.json` — no hardcoding needed.
+### Verify capture is actually producing usable data
 
-### Verify vulnbox capture is streaming
+Don't just check the loop is running — check Tulip is turning files into flows:
 
 ```bash
-# From monitor, check that pcap-broker is sending traffic
-nc -v "$VULNBOX_IP" 4242 | xxd | head -5
-# Should see pcap global header: d4 c3 b2 a1 ...
+docker exec tulip-timescale-1 psql 'postgres://tulip@timescale:5432/tulip' \
+  -c "SELECT count(*), max(time) FROM flow;"
+# max(time) should be within the last minute or two if traffic is live.
+# If count never grows and docker logs tulip-assembler-1 keeps saying
+# "Processed 0 packets" on files you can see have real packets in them
+# (check with: tcpdump -r traffic/<file>.pcap | wc -l) — see the BPF gotcha below.
 ```
+
+---
+
+## Deploying ctf_proxy Against a Real Vulnbox
+
+> This inserts a filtering proxy into the actual traffic path for a live service.
+> **It WILL cause a few seconds of downtime** when the port binding flips over —
+> confirm this is an acceptable risk window before doing it during a scored round.
+
+This is now config-driven and automated (`vulnbox-deploy/deploy-ctfproxy.sh`,
+called by `deploy-all.sh`), because the only safe way to insert a proxy in
+front of a *live* service is to know exactly which compose file/service/network
+it lives in. Guessing at an unfamiliar layout risks a bad edit to a real
+service's config. The script does nothing by default and only acts once you
+tell it where to look — and even then it re-verifies every assumption over SSH
+immediately before touching anything, skipping cleanly (exit 0, monitor-only
+stays up) if any check fails.
+
+### Point it at the real target
+
+Edit `services.json` → `ctf_proxy.insertion`:
+```json
+"insertion": {
+    "mode": "docker-compose",
+    "remote_compose_file": "~/practice-setup/<team>/docker-compose.yml",
+    "remote_compose_service": "public-proxy",
+    "remote_network_name": "<team>_proxy-public",
+    "remote_ssh_alias": "dfcd-vbox"
+}
+```
+Default `mode` is `"disabled"` — i.e. monitor-only, nothing attempted. You find
+`remote_network_name` with `ssh <alias> "docker network ls"` on the vulnbox-host
+(it's whatever network the target service's own compose file defines, usually
+named `<project>_<network-key-in-that-compose-file>`).
+
+### What it actually does (same steps whether you run it by hand or let the script)
+
+```bash
+bash vulnbox-deploy/deploy-ctfproxy.sh
+```
+1. Verifies: SSH reachable, compose file exists, the named service is defined
+   in it, that service actually publishes the target port, the named network
+   exists, `docker compose` is available remotely. Any failure → skip, exit 0.
+2. Copies `ctf_proxy` source to the vulnbox-host (`~/ctf-proxy-<team_id>/`).
+3. Writes `proxy/config/config.json` — `target_ip` = the compose SERVICE NAME
+   (not an IP; resolved via Docker DNS once ctf_proxy joins the network),
+   `target_port` = the container-internal port found in step 1, `listen_port`
+   = the public port from `services.json`.
+4. Writes ctf_proxy's own `docker-compose.yml` so `nginx`+`proxy` join the
+   vulnbox's **existing** network instead of creating their own.
+5. Removes the public port line from the ORIGINAL service's compose file
+   (backed up first as `<file>.pre-ctfproxy.bak`) and recreates just that one
+   container to release the port — this is the few-seconds-downtime moment.
+6. Builds + starts ctf_proxy, with a built-in recovery for a known startup
+   race (see below), then curls the target port to confirm real traffic still
+   gets through before declaring success.
+
+**Known gotcha, already handled by the script — nginx container boots into a
+broken state:** `docker logs <ctfproxy>-nginx` repeating `host not found in
+upstream "proxy:<port>"` even though the hostname resolves fine from every
+other container on the same network means the nginx container got created
+with no network attached (`docker inspect <name> --format
+'{{json .NetworkSettings.Networks}}'` prints `{}`). A plain restart does not
+fix this — the script detects this exact state and does `docker rm -f` +
+fresh `up -d` automatically. If you're ever doing this by hand instead, same fix.
+
+`filter_modules/web/web_in.py` on the remote starts as an empty template —
+ctf_proxy passes everything through until you write actual detection rules
+there (see the Tulip/Dashboard workflow a few sections up). Don't assume
+"ctf_proxy is running" means "attacks are being blocked."
 
 ---
 
@@ -320,7 +438,7 @@ Setup_tool/
 ├── vault/                     ← Documents for AnythingLLM RAG (currently empty)
 │
 ├── vulnbox-deploy/            ← Deploy scripts for a REAL vulnbox (NOT auto-run)
-│   ├── deploy-capture.sh
+│   ├── deploy-capture-pull.sh  ← actual capture method used: SSH + tcpdump + rsync pull loop
 │   ├── deploy-os-watchdog.sh
 │   ├── deploy-honeytoken.sh
 │   └── os-watchdog-agent.sh
@@ -337,14 +455,110 @@ Setup_tool/
 
 ## Troubleshooting
 
+### Always start here
+
+```bash
+bash health-check.sh
+```
+One-shot, read-only diagnostic covering every failure mode we've actually hit
+in practice (disk space, container status, vulnbox SSH reachability, pull
+loop, Tulip flow freshness, Ollama). Each line names the exact fix command.
+Run this BEFORE trying to debug anything by hand — most incidents below were
+things this script would have caught in 10 seconds instead of a long manual
+investigation.
+
+### Quick table
+
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
 | Dashboard blank | WebSocket connection failed | Check Redis is up: `docker compose ps redis` |
-| No Tulip flows | Pcap-broker not running on vulnbox | `bash vulnbox-deploy/deploy-capture.sh` |
-| IOC Brain 503 | Ollama not running | `ollama serve &` |
+| No Tulip flows at all | Pull loop not running / vulnbox unreachable | `ssh dfcd-vbox "echo OK"` first, then `bash vulnbox-deploy/deploy-capture-pull.sh` |
+| `ssh dfcd-vbox` times out at banner exchange | Azure VM(s) stopped/deallocated | Start them from Azure portal/CLI — not fixable from this machine |
+| Flows exist but count stuck, old timestamp only | Pull loop silently died (e.g. Monitor watch expired) | Check `ps aux \| grep rsync`; restart the pull loop |
+| IOC Brain 503 | Ollama not running | `systemctl status ollama` (it's a systemd service, not a container — should survive reboots on its own; `systemctl start ollama` if not) |
 | LLM model missing | Model not pulled | `ollama pull <model-name>` |
-| Detection not firing | Traffic dir empty | Check `./traffic/` has .pcap files |
 | Watchdog shows unknown | Can't reach vulnbox | Check vulnbox IP in services.json |
+
+### Real incidents hit in practice — full root cause (so you don't need to re-debug from scratch)
+
+**1. Disk fills up to 100%, everything silently breaks (rsync, docker, writes)**
+- Symptom: pull loop looks "stuck" with no error printed; `docker` commands hang or fail oddly.
+- Check: `df -h /` — if near 100%, this is it.
+- Real cause here was Docker layer/build cache piling up across many rebuild
+  cycles, not pcap data. Fix, in order of how much it reclaims:
+  ```bash
+  docker builder prune -af   # buildx cache — often the single biggest offender
+  docker image prune -af
+  ```
+- **Don't assume it's the pcap files** — `du -sh traffic/` to rule that out
+  first; a full disk from unrelated Docker cache looks identical from the
+  pull-loop's point of view.
+
+**2. tcpdump dies with "Permission denied" after exactly one file rotation**
+- Cause: `sudo tcpdump` drops from root to the `tcpdump` user after opening the
+  first capture file. The second file (after `-G <seconds>` rotates) gets
+  created by that dropped-privilege user and often can't be written.
+- Fix: always launch with `sudo tcpdump -Z root ...` to keep root for every
+  rotation, not just the first file. Already baked into
+  `vulnbox-deploy/deploy-capture-pull.sh` — if you ever hand-roll a tcpdump
+  command instead of using that script, don't forget this flag.
+
+**3. Pulled pcap files process "0 packets" in Tulip despite having real traffic in them**
+- This is NOT a truncated/mid-write file (check that first: `tcpdump -r
+  traffic/<file>.pcap | wc -l` — if it shows real packets, the file is fine).
+- Real cause: Tulip's assembler applies the `BPF` filter (from `.env`, derived
+  from `services.json`'s `port` field) even when reading already-captured
+  files, not just live interfaces. If capture happens on a Docker bridge
+  **behind a NAT** (public port 8003 → container's internal port 80), the BPF
+  filter for "port 8003" matches nothing, because the bridge only ever sees
+  port 80.
+- Fix: add `"capture_port": 80` next to that service's `"port": 8003` entry in
+  `services.json` (only needed when the capture point is downstream of a NAT —
+  a traditional vulnbox capturing on a plain NIC doesn't need this).
+  `generators/gen-tulip-env.py` prefers `capture_port` over `port` for the BPF
+  string if present. After editing, re-run:
+  ```bash
+  python3 generators/gen-tulip-env.py
+  cd offline-bundle/repos/tulip && docker compose up -d assembler
+  ```
+- Diagnose quickly which port the capture point actually sees:
+  ```bash
+  tcpdump -r traffic/<file>.pcap "port <public_port>" | wc -l   # 0 = mismatch
+  tcpdump -r traffic/<file>.pcap "port <container_port>" | wc -l # should be >0
+  ```
+
+**4. Pulling a pcap file mid-write gives Tulip a truncated copy it never retries**
+- Symptom: assembler log shows `PCAP OpenOffline error: truncated dump file`
+  once, then never looks at that filename again even though a later rsync
+  would have gotten the complete file.
+- Fix already in `deploy-capture-pull.sh`: only rsync files the remote `find`
+  reports as older than ~35s (one rotation period) — i.e. tcpdump has
+  definitely moved on to the next file and this one is done being written.
+  If you ever write a pull loop by hand, keep this guard; a bare
+  `rsync -az remote:dir/ local/` every N seconds WILL eventually grab a file
+  mid-write and lose that chunk of traffic silently.
+
+**6. A container started by hand (`docker compose up -d <svc>`) crashes on empty config**
+- Cause: compose got its values from environment variables that only existed inside
+  `bringup.sh`'s shell. Fixed: `bringup.sh` now writes them to `./.env`, which compose reads
+  automatically. If you see it again, re-run `bash bringup.sh` once to regenerate `.env`.
+
+**7. Restricting an endpoint by client IP doesn't work on this machine**
+- Docker here is rootless podman: every inbound connection reaches the container from the
+  netns gateway (e.g. 10.0.0.20), never the real client IP. Anything that must not be public
+  has to be on a port bound to `127.0.0.1`, not behind an IP check. (This is also why the
+  honeytoken alert's `src_ip` is the gateway, not the attacker.)
+
+**8. Every control-plane port was listening on 0.0.0.0 (reachable from the competition VPN)**
+- Fixed: compose ports bind `${BIND_IP}` (services.json `monitor_host.bind_ip`, default
+  127.0.0.1). `generators/gen-tulip-env.py` re-applies the same to Tulip's upstream compose
+  files on every run. Only port 9999 (honeytoken + OS-watchdog intake) is public.
+  Check any time: `ss -ltn | grep -v 127.0.0.1`
+
+**5. ctf_proxy's nginx container stuck with no network attached**
+- See the "Known gotcha" note under "Deploying ctf_proxy Against a Real
+  Vulnbox" above. Short version: `docker rm -f` the nginx container and
+  `docker compose up -d nginx` again; a plain `restart` does not fix it.
 
 ---
 

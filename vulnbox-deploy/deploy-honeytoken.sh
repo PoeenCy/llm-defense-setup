@@ -13,22 +13,26 @@ die() { echo -e "${RED}[FATAL]${NC}            $*"; exit 1; }
 
 [[ -f "$CONFIG" ]] || die "services.json not found"
 
-VULNBOX_IP=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['vulnbox']['ip'])")
-SSH_USER=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['vulnbox']['ssh_user'])")
-SSH_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['vulnbox'].get('ssh_port',22))")
-MONITOR_IP=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['monitor_host']['ip'])")
-HONEYTOKEN_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['honeytoken']['endpoint_port'])")
-HONEYTOKEN_FLAG=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['honeytoken']['flag'])")
+cfgval() { python3 -c "import json,sys; d=json.load(open('$CONFIG')); print(eval(sys.argv[1]))" "$1" 2>/dev/null || true; }
+# Honeytoken writes decoy files to the vulnbox HOST filesystem and installs a
+# trap process, so it needs the ADMIN alias (capture_ssh_alias), not the team
+# patch key (ssh_user, which only reaches the public-proxy container).
+ALIAS=$(cfgval "d['vulnbox'].get('capture_ssh_alias') or ''")
+MONITOR_IP=$(cfgval "d['monitor_host']['ip']")
+HONEYTOKEN_PORT=$(cfgval "d['honeytoken']['endpoint_port']")
+HONEYTOKEN_FLAG=$(cfgval "d['honeytoken']['flag']")
+skip() { echo -e "${CYAN}[DEPLOY-HONEYTOKEN]${NC} [SKIP] $* — honeytoken not installed; everything else keeps working."; exit 0; }
 
-SSH="ssh -p $SSH_PORT -o StrictHostKeyChecking=no"
+[[ -n "$ALIAS" ]] || skip "vulnbox.capture_ssh_alias not set in services.json"
+SSH="ssh -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no"
 
-log "Deploying honeytoken to $SSH_USER@$VULNBOX_IP"
+log "Deploying honeytoken to $ALIAS"
 log "  Honeytoken: $HONEYTOKEN_FLAG"
 log "  Reports to: http://$MONITOR_IP:$HONEYTOKEN_PORT/honeytoken"
 
-$SSH "$SSH_USER@$VULNBOX_IP" "echo SSH-OK" || die "SSH failed"
+timeout 15 $SSH "$ALIAS" "echo SSH-OK" >/dev/null 2>&1 || skip "ssh $ALIAS unreachable (VM stopped?)"
 
-$SSH "$SSH_USER@$VULNBOX_IP" "
+$SSH "$ALIAS" "
 set -e
 MONITOR_URL='http://${MONITOR_IP}:${HONEYTOKEN_PORT}/honeytoken'
 HONEYTOKEN='${HONEYTOKEN_FLAG}'
@@ -78,7 +82,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.wfile.write(FLAG.encode())
     def log_message(self, *a): pass
 
-http.server.HTTPServer(('0.0.0.0', 7777), H).serve_forever()
+http.server.HTTPServer(('127.0.0.1', 7777), H).serve_forever()
 FLAGEOF
 chmod +x /usr/local/bin/flag-server.sh
 
@@ -89,4 +93,5 @@ echo 'Deployment complete.'
 "
 
 ok "Honeytoken deployed"
-log "Test: curl http://$VULNBOX_IP:7777/ — should trigger alert on monitor"
+log "Decoy files: /opt/flags/flag.txt /tmp/.secret/flag /root/.bash_history_backup /etc/.hidden_flag (reading any = alert)"
+log "Needs inotify-tools on the vulnbox for the file traps; without it only the decoy files are placed (still caught leaving in pcap as honeytoken-out)."

@@ -31,3 +31,14 @@ __pycache__/
 # Misc
 *.log
 .DS_Store
+.host-agent.log
+.status-pusher.log
+vulnbox-deploy/.capture-pull.*
+suricata/lib/rules/backups/
+suricata/lib/rules/.staging.rules
+.env
+config-backups/
+.redeploy-from-dashboard.log
+dashboard/**/__pycache__/
+hostagent/**/__pycache__/
+rules-library/ctfproxy/__pycache__/

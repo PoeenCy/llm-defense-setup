@@ -60,12 +60,23 @@ create_snapshot() {
 }
 
 # ── Send alert to monitor ─────────────────────────────────────
+# JSON string escaping in pure bash (process command lines and diff output
+# contain quotes, backslashes and newlines — unescaped they broke the JSON and
+# the report was silently rejected).
+json_str() {
+    local s="$1"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"
+    s="$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037')"
+    printf '"%s"' "$s"
+}
+
 send_alert() {
     local type="$1"
     local message="$2"
     local detail="${3:-}"
 
-    local payload="{\"type\":\"os-watchdog\",\"alert_type\":\"$type\",\"message\":\"$message\",\"detail\":\"$detail\",\"vulnbox\":\"$(hostname)\"}"
+    local payload="{\"type\":\"os-watchdog\",\"alert_type\":$(json_str "$type"),\"message\":$(json_str "$message"),\"detail\":$(json_str "$detail"),\"vulnbox\":$(json_str "$(hostname)")}"
 
     curl -s -X POST "$REPORT_URL" \
          -H "Content-Type: application/json" \

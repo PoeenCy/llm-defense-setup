@@ -21,7 +21,7 @@ fi
 ok "JSON syntax valid"
 
 # Run the bulk of validation in Python (avoids shell quoting nightmares with dotted paths)
-python3 << 'PYEOF'
+python3 - "$CONFIG" << 'PYEOF'
 import json, re, sys, ipaddress
 
 CONFIG = sys.argv[1] if len(sys.argv) > 1 else "services.json"

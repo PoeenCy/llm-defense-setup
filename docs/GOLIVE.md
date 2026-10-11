@@ -18,6 +18,40 @@ trước khi bật thật trong lúc thi (không có thời gian debug giữa tr
 
 ---
 
+## PHASE 0 — Khung 5 câu hỏi (dùng cho MỌI môi trường thi mới, không riêng gì lần này)
+
+Mỗi giải có hạ tầng khác nhau (VM riêng, container share host, có/không VPN...). Đừng đoán —
+trả lời đúng 5 câu này rồi map thẳng vào `services.json`, không cần sửa code trừ câu 3.
+
+| # | Câu hỏi | Lệnh kiểm tra nhanh | Map vào field nào |
+|---|---|---|---|
+| 1 | Làm sao vào mạng thi? Đã connect chưa? | `ip addr`, `ping <scoreboard_ip>` | `monitor_host.ip` = IP mình thấy trên mạng đó |
+| 2 | Vulnbox của mình: máy riêng hay container share host? | `ssh <key> -p <port> <user>@<ip> hostname` | `vulnbox.ip`, `ssh_user`, `ssh_port` |
+| 3 | **Có chỗ nào chạy `tcpdump` với quyền root, thấy traffic thật không?** | xem bảng quyết định dưới | quyết định cách bắt gói tin (xem dưới) |
+| 4 | Flag format thật? | hỏi ban tổ chức / đọc rules | `flag.regex` |
+| 5 | Port/service thật cần theo dõi? | hỏi ban tổ chức / `nmap`/`curl` thử | `services[]` |
+
+**Câu 3 — 3 nhánh có sẵn, không cần code mới, chỉ chọn đúng nhánh:**
+
+| Tình huống | Làm gì |
+|---|---|
+| Chưa có gì, chỉ muốn test tool | `mock_vulnbox.enabled: true` (container giả, local) |
+| Vulnbox tự chạy sẵn pcap-broker (hiếm, ban tổ chức phải set up) | `vulnbox.live_pcap_broker: true` — Tulip nhận live stream qua `PCAP_OVER_IP` |
+| Có root+tcpdump ở ĐÂU ĐÓ thấy traffic thật (vulnbox thật, hoặc máy admin khác như trường hợp DFCD) — **nhưng không có broker** | `bash vulnbox-deploy/deploy-capture-pull.sh` — tcpdump remote + rsync kéo pcap về `traffic/` mỗi 15s, Tulip đọc qua directory-watch (không cần sửa `PCAP_OVER_IP`, mặc định đã là chế độ này) |
+
+**Ví dụ thật đã làm (DFCD practice arena, 2026-10-10):** team key (`vulnbox.ssh_user/ssh_port`)
+chỉ vào được container `public-proxy`, không có `tcpdump`/root thật trong đó. Nhưng có SSH
+admin riêng (`~/.ssh/config` alias `dfcd-vbox`, ProxyJump qua gameserver) thấy được tới
+`vulnbox-host` — tìm đúng bridge Docker của network `team-01_proxy-public`
+(`docker network inspect <net> --format '{{.Id}}'` → `br-<12 ký tự đầu của Id>`), rồi chạy
+tcpdump ở đó. Thêm 2 field mới vào `vulnbox.*`: `capture_ssh_alias` (dùng SSH alias có sẵn,
+không cần tự dựng lại ProxyJump trong script), `docker_bridge`.
+
+**Lưu ý an toàn:** đừng commit/push `services.json` lên git khi nó đang chứa IP/thông tin hạ
+tầng thi thật — xem cảnh báo ở cuối Phase 1 dưới.
+
+---
+
 ## PHASE 1 — Monitor + Detect (làm được ngay hôm nay)
 
 ### Bước 0 — Thu thập thông tin từ ban tổ chức

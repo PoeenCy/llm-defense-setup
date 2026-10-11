@@ -32,7 +32,7 @@ services:
     container_name: ctf-redis
     restart: unless-stopped
     ports:
-      - "${ALERT_QUEUE_PORT:-6380}:6379"
+      - "${BIND_IP:-127.0.0.1}:${ALERT_QUEUE_PORT:-6380}:6379"
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     networks:
       - ctf-net
@@ -52,7 +52,10 @@ services:
     container_name: ctf-detection
     restart: unless-stopped
     ports:
-      - "${HONEYTOKEN_PORT:-9999}:9999"
+      # public: honeytoken traps + OS-watchdog reports from the vulnbox only
+      - "${HONEYTOKEN_PORT:-9999}:9997"
+      # admin/test endpoints (alerts listing, clear, inject-flag): loopback only
+      - "${BIND_IP:-127.0.0.1}:9998:9999"
     environment:
       - FLAG_REGEX=${FLAG_REGEX}
       - HONEYTOKEN_FLAG=${HONEYTOKEN_FLAG}
@@ -86,7 +89,8 @@ services:
       - REDIS_PORT=6379
       - TRAFFIC_DIR=/traffic
       - MONITOR_IP=${MONITOR_IP}
-      - TEAMS_CIDR=${TEAMS_CIDR}
+      - VULNBOX_IP=${VULNBOX_IP}
+      - ML_SOURCE_CIDR=${ML_SOURCE_CIDR:-}
     volumes:
       - ./traffic:/traffic:ro
       - ./services.json:/app/services.json:ro
@@ -132,12 +136,13 @@ services:
     container_name: ctf-mcp-tulip
     restart: unless-stopped
     ports:
-      - "8765:8765"
+      - "${BIND_IP:-127.0.0.1}:8765:8765"
     environment:
       - POSTGRES_RO_URI=${MCP_POSTGRES_RO_URI}
       - MCP_PORT=8765
     networks:
       - ctf-net
+      - tulip-internal
 
   ioc-brain:
     build:
@@ -146,7 +151,7 @@ services:
     container_name: ctf-ioc-brain
     restart: unless-stopped
     ports:
-      - "${IOC_API_PORT:-5001}:5001"
+      - "${BIND_IP:-127.0.0.1}:${IOC_API_PORT:-5001}:5001"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -178,18 +183,23 @@ services:
     container_name: ctf-dashboard
     restart: unless-stopped
     ports:
-      - "${DASHBOARD_PORT:-8080}:8080"
+      - "${BIND_IP:-127.0.0.1}:${DASHBOARD_PORT:-8080}:8080"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - TULIP_URL=http://${DOCKER_HOST_GATEWAY:-host.docker.internal}:${TULIP_WEB_PORT:-3000}
       - IOC_API_URL=http://ioc-brain:5001
+      - TULIP_API_URL=http://api:5000
+      - CONFIG=/srv/services.json
+      - RULES_PATH=/srv/rules/suricata.rules
       - MONITOR_IP=${MONITOR_IP}
       - VULNBOX_IP=${VULNBOX_IP}
     volumes:
-      - ./services.json:/app/services.json:ro
+      - ./services.json:/srv/services.json:ro
+      - ./suricata/lib/rules:/srv/rules:ro
+      - ./rules-library:/srv/rules-library:ro
     networks:
       - ctf-net
+      - tulip-internal   # reads flows from Tulip's API for the Rules tab
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -204,7 +214,7 @@ services:
     container_name: ctf-anythingllm
     restart: unless-stopped
     ports:
-      - "${ANYTHINGLLM_PORT:-3001}:3001"
+      - "${BIND_IP:-127.0.0.1}:${ANYTHINGLLM_PORT:-3001}:3001"
     environment:
       - STORAGE_DIR=/app/server/storage
       - JWT_SECRET=ctf-monitor-secret-change-me
@@ -226,6 +236,11 @@ volumes:
   anythingllm-storage:
 
 networks:
+  # Tulip's own compose network (project "tulip"). Joined only by mcp-tulip so
+  # it reaches timescale:5432 directly instead of via a host-published port.
+  tulip-internal:
+    external: true
+    name: tulip_internal
   ctf-net:
     name: ctf-net
     driver: bridge
