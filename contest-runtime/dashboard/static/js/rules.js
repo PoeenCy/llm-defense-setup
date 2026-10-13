@@ -378,31 +378,45 @@ async function quickApplySuricata(best) {
     ta.value = ta.value.replace(/\s*$/, '\n') + `# auto-added ${new Date().toISOString().slice(0, 19)} from event quickblock\n${d.rule}\n`;
   }
   const ap = await apiPost('/api/rules/suricata', { rules: ta.value });
-  return { ok: ap.ok, msg: ap.ok ? `✓ Suricata sid ${d.sid} đang alert.` : '✗ Suricata apply: ' + ap.output };
+  return { ok: ap.ok, msg: ap.ok ? `✓ Suricata sid ${d.sid} is now alerting.` : '✗ Suricata apply: ' + ap.output };
 }
 
-async function quickBlockFromEvent(e) {
+/* Shared by the Alert and Block quick-actions: load the flow, auto-pick the
+   narrowest safe candidate (prefer the leaked flag > a body/param value > a
+   query param > bare path/raw). Returns {best} or {error}. */
+async function _pickBestForEvent(e) {
   currentBuilder = 'cp';
   await rulesPrefillFromEvent(e);
   const picks = flowPicks;
-  if (!picks.length) return { ok: false, msg: 'Không tìm được request HTTP trong flow — không có gì để chặn tự động. Mở tab RULES để tự chọn.' };
+  if (!picks.length) return { error: 'No HTTP request found in this flow -- nothing to act on automatically. Open the RULES tab to pick by hand.' };
   const flag = (e.raw && e.raw.flag) || '';
-  // Prefer: the leaked flag itself > a body/param value > a query param > bare path/raw (ctf_proxy refuses this one below, Suricata doesn't need to).
   const score = p => (flag && p.value.includes(flag) ? 100 : 0) + (p.loc.where === 'body' ? 50 : p.loc.where === 'uri' && p.loc.param ? 40 : p.loc.where === 'header' ? 20 : 0) + Math.min(p.value.length, 30);
   const best = [...picks].sort((a, b) => score(b) - score(a))[0];
   if (best.value.length < 4) {
-    return { ok: false, msg: `Chuỗi tìm được quá ngắn ("${best.value}") — dễ chặn nhầm traffic thường. Mở tab RULES để chọn tay.` };
+    return { error: `Match found is too short ("${best.value}") -- too likely to hit normal traffic. Open the RULES tab to pick by hand.` };
   }
+  return { best };
+}
 
-  // 1) Suricata (detect) -- always safe, always attempted.
-  const suRes = await quickApplySuricata(best);
+/* Alert-only quick action: Suricata never blocks anything, so this is always
+   safe to auto-apply, even on a bare path/URL pick. */
+async function quickAlertFromEvent(e) {
+  const { best, error } = await _pickBestForEvent(e);
+  if (error) return { ok: false, msg: error };
+  const res = await quickApplySuricata(best);
+  return { ok: res.ok, msg: `${res.msg}\nSee/undo in the APPLIED tab.` };
+}
 
-  // 2) ctf_proxy (block) -- refused when the only pick is a bare path/URL
-  //    with no param, same lesson as the /image-sharing/ incident: blocking
-  //    a whole endpoint by path risks blocking the checker too.
+/* Block-only quick action: ctf_proxy. Refused when the only pick is a bare
+   path/URL with no param -- same lesson as the /image-sharing/ incident:
+   blocking a whole endpoint by path risks blocking the checker too. */
+async function quickBlockFromEvent(e) {
+  const { best, error } = await _pickBestForEvent(e);
+  if (error) return { ok: false, msg: error };
+
   let cpRes;
   if (best.loc.where === 'uri' && !best.loc.param) {
-    cpRes = { ok: false, msg: `ctf_proxy: chỉ có URL/path trần ("${best.value}") không có tham số cụ thể — KHÔNG tự chặn (dễ chặn luôn checker, như vụ /image-sharing/). Mở tab RULES để tự chọn đúng tham số/nội dung độc hại rồi chặn tay.` };
+    cpRes = { ok: false, msg: `ctf_proxy: only a bare URL/path ("${best.value}") with no specific parameter -- NOT auto-blocking (would likely block the checker too, like the /image-sharing/ incident). Open the RULES tab to pick the exact malicious parameter/content and block by hand.` };
   } else {
     currentBuilder = 'cp';
     applyPick(best.value, best.loc);
@@ -412,11 +426,10 @@ async function quickBlockFromEvent(e) {
       cpRes = { ok: false, msg: 'ctf_proxy: ' + errOut };
     } else {
       const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value });
-      cpRes = { ok: d.ok, msg: d.ok ? `✓ ctf_proxy đang chặn theo "${best.value.slice(0, 60)}".` : '✗ ctf_proxy: ' + d.output };
+      cpRes = { ok: d.ok, msg: d.ok ? `✓ ctf_proxy now blocking on "${best.value.slice(0, 60)}".` : '✗ ctf_proxy: ' + d.output };
     }
   }
-
-  return { ok: suRes.ok || cpRes.ok, msg: `${suRes.msg}\n${cpRes.msg}\nXem/undo tại tab APPLIED.` };
+  return { ok: cpRes.ok, msg: `${cpRes.msg}\nSee/undo in the APPLIED tab.` };
 }
 
 

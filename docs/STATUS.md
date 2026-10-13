@@ -770,3 +770,28 @@ correctly, unblock removes the rule, confirmed empty chain via SSH afterward. No
 behind on the vulnbox.
 
 Documented in `CONFIG.md`'s situational table.
+
+
+---
+
+## 2026-10-13 (later still, again) — split "Quick Block" into separate Alert/Block actions
+
+User asked to confirm what the EVENTS tab's combined quick-action button actually blocks by
+(confirmed: content from the request -- flag/body/param/header, never IP/User-Agent, and it
+refuses on a bare path with no parameter -- already correct, no change needed there), then
+asked for two things: (1) a dedicated Suricata-only quick action separate from the combined
+one, (2) consistent English for UI labels (flagged the old Vietnamese "⚡ Chặn ngay" button as
+an example of inconsistency against the mostly-English rest of the UI).
+
+**Changed**: `rules.js` factored the shared flow-load + narrowest-safe-match logic out of
+`quickBlockFromEvent` into `_pickBestForEvent()`, then split into two independent actions:
+`quickAlertFromEvent()` (Suricata only -- always safe, no confirmation needed since it can
+never break anything) and `quickBlockFromEvent()` (ctf_proxy only -- still refuses on a bare
+path/no-param match, still confirmed before running). `events.js`'s per-row buttons are now
+**Detail / Make rule / Alert / Block** (was: Detail / Make rule / "⚡ Chặn ngay" combining both).
+Translated the remaining Vietnamese strings in both files' confirm dialogs and result messages
+to English for consistency with the rest of the UI (did not touch the longer Vietnamese
+help-text blocks elsewhere in `index.html`, out of scope for this ask).
+
+Rebuilt and live-verified: `index.html`/`events.js`/`rules.js` all serve 200 with the new
+button markup (`data-act="alert"` / `data-act="block"`) confirmed in the served JS.

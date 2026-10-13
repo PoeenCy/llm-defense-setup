@@ -33,7 +33,8 @@ async function loadEvents() {
       <td style="white-space:nowrap;">
         <button class="er-btn-sm" data-act="detail" data-i="${i}">Detail</button>
         <button class="er-btn-sm" data-act="rule" data-i="${i}">Make rule</button>
-        <button class="er-btn-sm danger" data-act="quickblock" data-i="${i}" title="tự tải flow, tự chọn chuỗi hẹp nhất, build &amp; upload ctf_proxy ngay">⚡ Chặn ngay</button>
+        <button class="er-btn-sm" data-act="alert" data-i="${i}" title="Suricata only -- never blocks anything, always safe">Alert</button>
+        <button class="er-btn-sm danger" data-act="block" data-i="${i}" title="ctf_proxy -- auto-loads the flow, picks the narrowest safe match, uploads a real block. Refuses on a bare path with no parameter.">Block</button>
       </td>
     </tr>`;
   }).join('');
@@ -82,12 +83,23 @@ async function flowForEvent(e) {
   return e._flow;
 }
 
-async function quickBlockClicked(btn, e) {
-  if (!confirm('Tự tải flow, tự chọn chuỗi hẹp nhất, build & upload rule ctf_proxy NGAY (chặn thật, không hỏi lại)?\n\nNếu quá rộng (chặn cả path trần không có tham số) sẽ bị TỪ CHỐI thay vì tự áp — khi đó mở tab RULES để chọn tay.')) return;
+async function quickAlertClicked(btn, e) {
   const old = btn.textContent;
-  btn.disabled = true; btn.textContent = '⏳...';
+  btn.disabled = true; btn.textContent = '...';
   let res;
-  try { res = await quickBlockFromEvent(e); } catch (err) { res = { ok: false, msg: 'Lỗi: ' + err }; }
+  try { res = await quickAlertFromEvent(e); } catch (err) { res = { ok: false, msg: 'Error: ' + err }; }
+  btn.disabled = false; btn.textContent = old;
+  showToast(res.msg, res.ok ? 'success' : 'critical');
+  showTab('rules');
+  if (!res.ok) rulesPrefillFromEvent(e);
+}
+
+async function quickBlockClicked(btn, e) {
+  if (!confirm('Auto-load the flow, pick the narrowest safe match, build & upload a ctf_proxy block rule NOW (real block, no further confirmation)?\n\nToo broad a match (a bare path with no parameter) gets REFUSED instead of auto-applied -- open the RULES tab to pick by hand in that case.')) return;
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '...';
+  let res;
+  try { res = await quickBlockFromEvent(e); } catch (err) { res = { ok: false, msg: 'Error: ' + err }; }
   btn.disabled = false; btn.textContent = old;
   showToast(res.msg, res.ok ? 'success' : 'critical');
   if (res.ok) showTab('rules');   // let them see exactly what got uploaded
@@ -105,7 +117,8 @@ function initEvents() {
     const e = evRows[+b.dataset.i];
     if (b.dataset.act === 'detail') showModal(JSON.stringify({ ...e.raw, ts: e.ts }));
     if (b.dataset.act === 'rule') { showTab('rules'); rulesPrefillFromEvent(e); }
-    if (b.dataset.act === 'quickblock') quickBlockClicked(b, e);
+    if (b.dataset.act === 'alert') quickAlertClicked(b, e);
+    if (b.dataset.act === 'block') quickBlockClicked(b, e);
   });
   setInterval(() => {
     if (currentTab === 'events' && $('ev-auto').checked) loadEvents();
