@@ -1038,3 +1038,65 @@ Verified live: `POST http://<monitor>:9998/test/inject-flag` (detection_service'
 endpoint) pushes a real `flag-out` alert into Redis, confirmed it's recorded (`GET /api/applied`
 builtin counts incremented) -- the dashboard-side rendering (`core.js`) was verified by code
 review + `esprima` parse since a live browser wasn't available to click through in this session.
+
+
+---
+
+## 2026-10-14 — live-tested deploy-ctfproxy.sh on dfcd-vbox, no hardcoded ports confirmed, docs rewritten
+
+User explicitly asked to actually run the rewritten `deploy-ctfproxy.sh` against the real
+practice vulnbox (previous entry only dry-ran its embedded Python, never the live SSH path).
+Confirmed ctf_proxy had already been installed on `dfcd-vbox` for ~2 days (port 8003 already
+gone from the original compose file). To exercise the real insertion path (not just the
+already-covered idempotent-skip path), uninstalled first (`POST /api/services/ctfproxy/uninstall`
+-- confirmed traffic fell back to the original `public-proxy` container, HTTP 200), then ran
+`deploy-ctfproxy.sh` fresh. **Result: fully successful** -- preconditions verified, `config.json`/
+`docker-compose.yml` written correctly for the 1 eligible service, port handed over, built,
+started, verified `HTTP 200` through ctf_proxy again. `rsync --dry-run` had already confirmed
+(before running anything live) that re-deploying never touches an existing
+`filter_modules/<service>/` directory, so a live filter never gets wiped by a redeploy.
+
+Found (via Redis `audit` log timestamps, not guesswork) that the one pre-existing live rule
+(`blk_f_l2zsywcvzmxhzw`) had been deleted through the real `/api/rules/ctfproxy/delete` API at
+16:46:41 UTC -- 9 minutes BEFORE the uninstall/redeploy sequence even started (16:55:29 UTC) --
+so the redeploy did not cause this; it correctly preserved whatever state existed at the time
+(zero custom rules). Asked the user to confirm; they confirmed it was an intentional delete (by
+them or someone else using the live dashboard), not something to restore.
+
+User then raised a pointed concern: **"đừng nói là bạn mở port cứng" (don't tell me you
+hardcoded the port) -- real contest-day ports can differ from practice.** Grepped every file
+touched for the multi-service ctf_proxy work (`deploy-ctfproxy.sh`, `hostagent/actions/
+{ctfproxy,services}.py`, `routes/{rules,applied}.py`, `rulegen/ctfproxy.py`, `rules.js`,
+`applied.js`) for the literal practice port (`8003`) and for a hardcoded `"web"` service-name
+default -- zero matches in any of them. Every port/service-name in that code path is read from
+`services.json` at request time via `s["port"]`/`svc["name"]`, never a literal. The only places
+`8003` appears anywhere in the repo are Suricata's own logs (reflecting real traffic, not
+config), a test fixture, an old config-backup snapshot, and one HTML `placeholder` attribute (a
+greyed-out example hint in an empty input, never read as a value) -- none of them functional.
+
+**Docs rewrite** (user asked, after confirming the above: "viết lại các docs cho đúng với hiện
+tại"). Five docs flagged stale in earlier sessions, now fully rewritten against the real code
+(not guessed): `docs/ARCHITECTURE.md`, `docs/DASHBOARD_GUIDE.md`, `docs/RULE_COOKBOOK.md`,
+`docs/GOLIVE.md`, `docs/DEMO.md`. All LLM/ioc-brain/mcp-tulip/Ollama content removed (that
+component doesn't exist anymore); all now describe the multi-service/raw-TCP ctf_proxy support,
+the structured RULES/APPLIED tables, the stronger exfil notifications, and the content-based
+firewall fallback. `docs/DEMO.md` needed the most rework: its entire narrative was built around
+the removed LLM-analysis step and `harness.py`/mock-vulnbox-through-ctf_proxy, which turned out
+to be **structurally impossible to reproduce** in the current layout -- verified live (spun up
+`mock-vulnbox` via `MODE=prep`, confirmed via `docker exec ctf-dashboard python3 -c "urllib...` 
+that it answers on the Docker-DNS hostname with no ctf_proxy in front and no published port, then
+tore it back down) before rewriting the demo around things actually tested this session
+(`/test/inject-flag`, EVENTS quick-actions, APPLIED, SLA pause/resume) instead of inventing an
+unverified new script.
+
+Also fixed on the way, found while doing the rewrite (not the original ask, but directly
+relevant to doc accuracy): `docs/SCHEMA.md` was missing the `ctf_proxy` and `mock_vulnbox`
+top-level objects entirely and still listed a stale `monitor_host.ioc_api_port` field that no
+longer exists -- rewritten against the real `services.json` field-by-field. `docs/RUNBOOK.md`'s
+"Deploying ctf_proxy Against a Real Vulnbox" section rewritten for the multi-service loop (was
+single-service-only). Noted but did NOT fix (out of scope -- a code question, not a doc one):
+`gen-ctfproxy.py` is still called by `bringup.sh` and writes a local
+`offline-bundle/repos/ctf_proxy/proxy/config/config.json` targeting `mock_vulnbox.hostname`, but
+nothing in either compose file runs a local ctf_proxy container that reads it -- orphaned,
+harmless, now documented as such instead of left to look load-bearing. `docs/STATUS.md` and
+`docs/INVENTORY.md` deliberately left untouched (historical logs, not current-state docs).

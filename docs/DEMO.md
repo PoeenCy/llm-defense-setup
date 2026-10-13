@@ -1,7 +1,16 @@
-# DEMO.md — Kịch bản trình diễn hệ thống CTF Monitor (live audience)
+# DEMO.md — Kịch bản trình diễn hệ thống CTF Monitor Hub (live audience)
 
-> **Nguyên tắc vàng:** Mọi bước dưới đây chỉ dùng những gì đã **PASS** trong `STATUS.md`.
-> Không demo bất cứ thứ gì chưa chạy thật trên máy này.
+> **Nguyên tắc vàng:** Mọi bước dưới đây chỉ dùng những gì đã verify thật trong phiên làm việc
+> gần nhất (`docs/STATUS.md`, các mục 2026-10-13/14). Không demo bất cứ thứ gì chưa chạy thật.
+>
+> **Thay đổi so với bản cũ:** không còn bước "LLM phân tích IOC" — toàn bộ nhánh LLM/ioc-brain/
+> Ollama đã bị gỡ khỏi repo theo quyết định của người dùng. Phần harness.py/mock-vulnbox-qua-
+> ctf_proxy của bản cũ cũng **không còn áp dụng được**: `mock-vulnbox` (nay ở
+> `prep-only/training/mock-vulnbox/`) không publish port ra host và **không có ctf_proxy nào
+> đứng trước nó** trong layout hiện tại — ctf_proxy chỉ deploy qua SSH vào một vulnbox-host thật
+> reachable (`contest-runtime/defense/deploy-ctfproxy.sh`), không có nhánh local/compose cho
+> mock-vulnbox. Kịch bản dưới đây dùng đúng những gì thật sự nối với nhau: event thật → dashboard
+> → rule → APPLIED, không cần mock-vulnbox.
 
 ---
 
@@ -9,391 +18,180 @@
 
 | Giai đoạn | Thời gian |
 |---|---|
-| Pre-flight (trước khi khán giả vào) | ~15 phút |
+| Pre-flight (trước khi khán giả vào) | ~10 phút |
 | Intro + context cho khán giả | 2 phút |
-| Bước 1 — Tấn công qua proxy | 2 phút |
-| Bước 2 — Phát hiện (detection + Tulip) | 2 phút |
-| Bước 3 — Phân tích LLM (IOC) | 3 phút *(kết quả chạy sẵn)* |
-| Bước 4 — Phòng thủ (harness SLA) | 2 phút |
-| Q&A buffer | 4 phút |
-| **Tổng** | **~25 phút** |
+| Bước 1 — Một event thật xuất hiện | 2 phút |
+| Bước 2 — Dashboard phản ứng (EVENTS, cảnh báo) | 2 phút |
+| Bước 3 — Sinh rule & test (RULES) | 3 phút |
+| Bước 4 — Rule đang chạy ở đâu (APPLIED) | 2 phút |
+| Bước 5 — Kill switch / SLA (SERVICES) | 2 phút |
+| Q&A buffer | 5 phút |
+| **Tổng** | **~28 phút** |
 
 ---
 
-## Phần 0 — PRE-FLIGHT (chạy TRƯỚC khi khán giả vào phòng ~15 phút)
+## Phần 0 — PRE-FLIGHT (chạy TRƯỚC khi khán giả vào phòng ~10 phút)
 
-### 0-A. Bật toàn hệ thống
+### 0-A. Bật hệ thống
+
+Có vulnbox thật (ví dụ DFCD practice arena) reachable qua SSH → dùng `MODE=contest` để demo cả
+ctf_proxy thật. Không có gì sẵn → `MODE=prep` (chỉ thêm `mock-vulnbox`, nhưng lưu ý mock-vulnbox
+**không demo được ctf_proxy** — xem cảnh báo ở đầu file).
 
 ```bash
 cd /home/poeency/Documents/Setup_tool
-bash bringup.sh
+MODE=contest bash deploy-all.sh    # hoặc MODE=prep nếu chưa có vulnbox thật nào cấu hình
 ```
 
-**Output đúng trông như thế này** (trích đoạn quan trọng):
+**Output đúng trông như thế này** (trích đoạn quan trọng — 7 bước, bước nào fail thì lùi về an
+toàn, không dừng cả hệ thống):
 
 ```
-[OK]      ctf_proxy config generated
-[BRINGUP] Starting core services (redis, detection, watchdog, dashboard)...
-[BRINGUP] Probing bridge gateways for one that actually routes to the host...
-[WARN]    Using bridge gateway: 172.17.0.1 (set DOCKER_HOST_GATEWAY to override next time)
-[OK]      Hub services started
-[BRINGUP] Starting ctf_proxy (fronting mock-vulnbox at 10.0.0.2)...
-...
-🛡  CTF Monitor Hub is UP
+[Preflight] docker/docker-compose/python3/redis module ... OK
+[OK] services.json validated
+[OK] stack local started
+[OK] capture: tcpdump remote + pull loop running
+[OK] honeytoken / OS-watchdog deployed
+[OK] ctf_proxy deployed (N service(s))   # bỏ qua nếu insertion.mode != docker-compose
+[OK] health check: dashboard/detection/redis/tulip all UP
 ```
 
-> ⚠️ Nếu dòng `[WARN] Using bridge gateway:` in ra `10.88.0.1` thay vì `172.17.0.1` — **đừng tin ngay**,
-> dù bringup tự probe kết nối thật trước khi chọn (không phải đọc gateway mù như trước).
-> Xem bước 0-C để kiểm tra kết nối lại cho chắc.
-
----
-
-### 0-B. Health check — kiểm mọi service UP
+### 0-B. Health check nhanh
 
 ```bash
-curl -s http://localhost:9999/health | python3 -m json.tool   # detection
-curl -s http://localhost:8080/health | python3 -m json.tool   # dashboard
-curl -s http://localhost:5001/health | python3 -m json.tool   # ioc-brain
-curl -s http://localhost:3000 -o /dev/null -w "%{http_code}"  # Tulip UI → 200
-redis-cli -p 6380 ping                                         # → PONG
+curl -s http://localhost:8080/ -o /dev/null -w "dashboard HTTP %{http_code}\n"
+curl -s http://localhost:3000 -o /dev/null -w "Tulip UI HTTP %{http_code}\n"
+docker exec ctf-redis redis-cli ping
 ```
 
-**Output đúng:**
+Kỳ vọng: `200`, `200`, `PONG`.
 
-```
-# detection
-{"status":"ok","service":"detection"}
+### 0-C. Chuẩn bị 1 event thật để chỉ sẵn trên màn hình
 
-# dashboard
-{"status":"ok","service":"dashboard"}
-
-# ioc-brain
-{"status":"ok","service":"ioc-brain","model":"foundation-sec-8b-chat"}
-
-# Tulip UI
-200
-
-# Redis
-PONG
-```
-
-> **Lưu ý Redis:** Health check HTTP của bringup.sh báo WARN cho Redis vì nó GET một non-HTTP port.
-> Bỏ qua — `redis-cli ping → PONG` là đủ bằng chứng Redis sống.
-
----
-
-### 0-C. ⚠️ Verify kết nối gateway THẬT SỰ (podman-specific, BẮT BUỘC)
-
-Máy này chạy **podman** thay vì Docker Engine thật. Gateway bridging đã từng lật giữa hai run:
-- `172.17.0.1` → đáng tin cậy, đã hoạt động ổn định
-- `10.88.0.1` → đã chết một lần không rõ lý do
-
-**Kiểm tra ioc-brain → Ollama:** (container không có `curl`, dùng python3)
+Đừng chờ một cuộc tấn công thật xảy ra đúng lúc demo — chuẩn bị sẵn ít nhất 1 alert trước:
 
 ```bash
-docker exec ctf-ioc-brain python3 -c "
-import urllib.request, os
-url = os.environ['OLLAMA_HOST'] + '/api/tags'
-body = urllib.request.urlopen(url, timeout=5).read().decode()
-print('foundation-sec-8b-chat' in body)
-"
+# detection_service.py có sẵn endpoint test này (không phải mock data giả trong UI — alert
+# này đi qua đúng đường ống thật: push_alert → Redis "alerts" → publish → dashboard nhận qua WS)
+curl -s -X POST http://127.0.0.1:9998/test/inject-flag   # port admin của detection, xem docker-compose
 ```
 
-Output đúng: `True`.
+Mở sẵn Dashboard ở tab **EVENTS**, xác nhận event `flag-out` "TEST: Fake flag-out injected..." đã
+xuất hiện.
 
-**Kiểm tra mcp-tulip → Postgres:**
-
-```bash
-docker exec ctf-mcp-tulip python3 -c "
-import psycopg2, os
-conn = psycopg2.connect(os.environ['POSTGRES_RO_URI'])
-cur = conn.cursor()
-cur.execute('SELECT COUNT(*) FROM flow')
-print('Flows in DB:', cur.fetchone()[0])
-conn.close()
-"
-```
-
-Output đúng: `Flows in DB: <số ≥ 1>`
-
-**Nếu một trong hai kết nối fail:**
-
-```bash
-# 1. Xem gateway hiện tại đã bake vào container (OLLAMA_HOST, không phải DOCKER_HOST_GATEWAY —
-#    biến đó chỉ tồn tại ở host lúc bringup.sh chạy, không truyền vào container)
-docker exec ctf-ioc-brain printenv OLLAMA_HOST
-
-# 2. Thử thủ công từng candidate
-docker exec ctf-ioc-brain python3 -c "import urllib.request; print(urllib.request.urlopen('http://172.17.0.1:11434/api/tags', timeout=3).status)"
-docker exec ctf-ioc-brain python3 -c "import urllib.request; print(urllib.request.urlopen('http://10.88.0.1:11434/api/tags', timeout=3).status)"
-
-# 3. Nếu gateway sai → teardown và bringup lại
-#    bringup.sh có logic live-probe nc -z, sẽ tự phát hiện lại
-bash teardown.sh && bash bringup.sh
-```
-
----
-
-### 0-D. Warm-up LLM — PHẢI làm trước khi khán giả vào
-
-Model `foundation-sec-8b-chat` trên CPU mất **~100–120s** cho lần gọi đầu tiên (cold-start:
-model nạp vào RAM, KV-cache trống). Nếu khán giả đang xem mà phải chờ 2 phút im lặng → mất hứng.
-
-**Bước 1 — Gọi nháp để nạp model:**
-
-```bash
-curl -s -X POST http://localhost:5001/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"log_snippet": "warmup probe — discard this result"}' \
-  | python3 -m json.tool
-```
-
-Chờ đến khi trả về JSON (dù confidence thấp). Sau đó Ollama giữ model trong RAM.
-
-**Bước 2 — Chạy trước analyze với flow_id thật và lưu kết quả:**
-
-```bash
-# Lấy flow_id có tag flag-out từ Tulip DB
-REAL_FLOW_ID=$(docker exec ctf-mcp-tulip python3 -c "
-import psycopg2, os
-conn = psycopg2.connect(os.environ['POSTGRES_RO_URI'])
-cur = conn.cursor()
-cur.execute(\"SELECT id FROM flow WHERE 'flag-out' = ANY(tags) LIMIT 1\")
-print(cur.fetchone()[0])
-conn.close()
-")
-echo "Flow ID to use in demo: $REAL_FLOW_ID"
-
-# Chạy analyze thật — đây là lần mất 100–120s, làm TRƯỚC khi khán giả vào
-curl -s -X POST http://localhost:5001/analyze \
-  -H "Content-Type: application/json" \
-  -d "{\"flow_id\": \"$REAL_FLOW_ID\"}" \
-  | tee /tmp/demo_ioc_result.json | python3 -m json.tool
-```
-
-Lưu lại `REAL_FLOW_ID` và xác nhận `/tmp/demo_ioc_result.json` có `attacker_ip` và `flag`.
-
----
-
-### 0-E. Lưu fallback logs (chạy ngay sau 0-D)
-
-```bash
-mkdir -p /tmp/demo_fallback
-
-# Log ctf_proxy PASS (harness.py, not curl — the block response is raw TCP
-# bytes with no HTTP status line, so curl shows an empty body + HTTP 000)
-(cd offline-bundle/repos/ctf_proxy && python3 harness.py 127.0.0.1 9001) 2>&1 \
-  | tee /tmp/demo_fallback/ctf_proxy_pass.log
-
-# Log detection PASS
-curl -s http://localhost:9998/alerts/recent 2>&1 \
-  | tee /tmp/demo_fallback/detection_pass.log
-
-# Log harness PASS
-cd offline-bundle/repos/ctf_proxy && python3 harness.py 2>&1 \
-  | tee /tmp/demo_fallback/harness_pass.log && cd -
-
-echo "Fallback logs saved:"
-ls -la /tmp/demo_fallback/
-```
+> Nếu có vulnbox thật và muốn demo bằng traffic THẬT thay vì inject test: gửi một request chứa
+> chuỗi khớp `flag.regex` tới service thật, đợi vài giây cho tcpdump/pcap-pull/Suricata/Tulip xử
+> lý xong (chu kỳ pull mặc định 15s). Chậm hơn nhưng thuyết phục hơn — cân nhắc theo thời gian có.
 
 ---
 
 ## Phần 1 — INTRO (2 phút, nói với khán giả)
 
-> *"Chúng tôi xây một hệ thống bảo vệ tự động cho Attack-Defense CTF.
-> Nó gồm ba lớp: (1) proxy chặn đòn tấn công vào service của mình,
-> (2) detection engine phát hiện khi flag bị lấy, và (3) LLM phân tích
-> flow để ra IOC — attacker IP, flag cụ thể — trong vòng một tick.
-> Tôi sẽ demo toàn bộ vòng lặp này live ngay bây giờ."*
+> *"Chúng tôi xây một hệ thống phòng thủ cho Attack-Defense CTF — không dùng AI, mọi quyết định
+> chặn là con người tự đọc traffic thật rồi bấm. Hệ thống có ba lớp: (1) capture + phát hiện —
+> biết ngay khi có traffic lạ hoặc flag bị lấy, (2) công cụ sinh rule từ chính traffic thật, không
+> cần biết code, và (3) hai nơi chặn thật — Suricata chỉ cảnh báo, ctf_proxy/iptables mới chặn
+> được. Tôi demo toàn bộ vòng lặp này live ngay bây giờ."*
 
-Mở sẵn trên màn hình: terminal chia đôi — bên trái gõ lệnh, bên phải theo dõi log detection.
+Mở sẵn: Dashboard tab EVENTS trên 1 màn, terminal theo dõi log trên màn khác.
 
 ```bash
-# Cửa sổ bên phải — chạy suốt toàn bộ demo
-docker logs -f ctf-detection 2>&1 | grep -E "(ALERT|flag-out|sqli|BLOCK)"
+docker logs -f ctf-detection 2>&1 | grep -iE "alert|flag-out|proxy-blocked"
 ```
 
 ---
 
-## Phần 2 — DEMO THEO KỊCH BẢN (Happy Path)
+## Phần 2 — DEMO THEO KỊCH BẢN
 
 ---
 
-### Bước 1 — Tấn công: SQLi qua ctf_proxy edge ⏱ ~2 phút
+### Bước 1 — Một event thật xuất hiện ⏱ ~2 phút
 
-> ⚠️ **Không dùng `curl` tay cho bước này.** Response bị block là **raw TCP bytes, không phải
-> HTTP** (`block_packet()` trong ctf_proxy gửi thẳng `KEYWORD + service + attack_name` qua
-> socket, không có status line) — `curl -s` sẽ hiện **trống + `HTTP 000`**, trông như treo/lỗi
-> dù thực ra đang chặn đúng. Dùng `harness.py` (đã viết sẵn, dùng raw socket, hiển thị đúng byte
-> thật) — cũng tránh luôn lỗi credentials sai (test trước đó từng dùng nhầm `player/ctf123`,
-> app mock-vulnbox chỉ có user `admin/sup3rs3cr3t`).
-
-**Lệnh gõ:**
+Event `flag-out` đã chuẩn bị ở Pre-flight 0-C đang nằm trong EVENTS. Nếu muốn một cái **mới**,
+ngay trước mặt khán giả:
 
 ```bash
-cd offline-bundle/repos/ctf_proxy
-python3 harness.py 127.0.0.1 9001
-```
-
-**Kết quả mong đợi (đã verified, chạy lại nhiều lần ổn định):**
-
-```
-[harness] legit login: PASS — b'HTTP/1.1 200 OK\r\ndate: ...'
-[harness] SQLi blocked: PASS — b'CTFMONITOR_BLOCKED svc1 sqli_login'
-[harness] RESULT: PASS — safe to deploy (filter already live via hot-reload)
-```
-
-> Nếu muốn khán giả thấy response raw rõ hơn, mở thêm 1 cửa sổ chạy:
-> ```bash
-> python3 -c "
-> import socket
-> body = '{\"username\": \"admin\'--\", \"password\": \"x\"}'
-> req = f'POST /login HTTP/1.1\r\nHost: 127.0.0.1:9001\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}'
-> s = socket.create_connection(('127.0.0.1', 9001), timeout=5)
-> s.sendall(req.encode())
-> print(s.recv(4096))
-> "
-> ```
-> In ra đúng `b'CTFMONITOR_BLOCKED svc1 sqli_login'` — khán giả nhìn thấy byte thật, không phải JSON/HTTP giả.
-
-**Chứng minh SLA còn sống (dùng đúng credentials thật — admin/sup3rs3cr3t):**
-
-```bash
-curl -s -X POST http://127.0.0.1:9001/login \
-  -H "Content-Type: application/json" \
-  -d '{"username": "admin", "password": "sup3rs3cr3t"}' \
-  -w "\nHTTP %{http_code}\n"
-```
-
-Kết quả mong đợi: `{"status":"ok","token":"..."}` + `HTTP 200`.
-
-**Nói với khán giả:**
-
-> *"SQL injection `admin'--` bypass WHERE clause — đòn cổ điển nhất trong sách.
-> ctf_proxy nhận request tại edge, filter `svc1_in.py` nhận ra pattern `sqli_login`,
-> trả về `CTFMONITOR_BLOCKED` ngay lập tức — request không bao giờ chạm service thật.
-> Request player hợp lệ vẫn 200 OK — SLA không ảnh hưởng."*
-
----
-
-### Bước 2 — Phát hiện: flag-out alert < 2s ⏱ ~2 phút
-
-**Inject flag-out:**
-
-```bash
-time curl -s -X POST http://localhost:9998/test/inject-flag \
-  | python3 -m json.tool
-```
-
-**Kết quả mong đợi:**
-
-```json
-{"status": "injected"}
-```
-```
-real    0m0.021s
-```
-
-**Kiểm tra alert:**
-
-```bash
-curl -s http://localhost:9998/alerts/recent \
-  | python3 -m json.tool \
-  | grep -A5 '"type": "flag-out"'
-```
-
-**Kiểm tra Tulip:**
-
-```bash
-docker exec tulip-timescale-1 psql "postgres://tulip@timescale:5432/tulip" -c \
-  "SELECT ip_src, ip_dst, tags, flags FROM flow WHERE 'flag-out' = ANY(tags) ORDER BY time DESC LIMIT 1;"
-```
-
-**Kết quả mong đợi (đã verified):**
-
-```
-  ip_src   |  ip_dst  |       tags          |            flags
------------+----------+---------------------+-------------------------------------
- 10.60.9.9 | 10.0.0.2 | {tcp,http,flag-out} | {QCYM5CGWGP8KI34N0WRXULDJ7GZTDB=}
+curl -s -X POST http://127.0.0.1:9998/test/inject-flag | python3 -m json.tool
 ```
 
 **Nói với khán giả:**
 
-> *"Trong 21ms, detection engine bắt được flag bị exfil.
-> Tulip đã tag flow đó với flag thật `QCYM5CGWGP8KI34N0WRXULDJ7GZTDB=`.
-> Chúng tôi biết: ai lấy, flag nào, flow nào — sẵn sàng để LLM phân tích sâu hơn."*
+> *"Đây là một flag vừa 'rời' service — alert này đi qua đúng hàng đợi Redis thật mà một traffic
+> thật cũng sẽ đi qua, không phải dữ liệu giả hiển thị trong UI."*
 
 ---
 
-### Bước 3 — Phân tích LLM: IOC JSON ⏱ ~3 phút (dùng kết quả đã chạy sẵn)
+### Bước 2 — Dashboard phản ứng ⏱ ~2 phút
 
-> ⚠️ **ĐỌC KỸ TRƯỚC KHI LÊN SÂN KHẤU:**
->
-> Bước này mất **100–120s** trên CPU (không có GPU). **KHÔNG** đứng im chờ live trước khán giả.
->
-> - **(A — Khuyến nghị):** Trình kết quả đã chạy trong pre-flight từ `/tmp/demo_ioc_result.json`.
-> - **(B — Nếu muốn live):** Gõ lệnh rồi **ngay lập tức** chuyển sang giải thích architecture
->   trong khi model chạy ngầm. Đừng nhìn vào màn hình chờ.
+Chỉ cho khán giả thấy trên tab EVENTS:
+- Event mới nằm đầu danh sách, mức **CRITICAL**.
+- Toast "🚨 DATA LEFT A SERVICE" **dính màn hình** (không tự biến mất như toast thường) — phải bấm
+  mới tắt. Giải thích: `flag-out`/`honeytoken-out` được cố ý làm "khó bỏ lỡ" hơn các loại event
+  khác — không tạo rule tự động, chỉ đảm bảo không ai lướt qua mà không thấy.
+- Mỗi dòng event có 4 nút: **Detail** (raw JSON) · **Make rule** · **Alert** (tự sinh + áp ngay 1
+  rule Suricata, luôn an toàn) · **Block** (tự sinh + upload ctf_proxy, có xác nhận).
 
-**Phương án A (khuyến nghị):**
+**Nói với khán giả:**
+
+> *"Không có bước nào ở đây tự động chặn. Tất cả 4 nút đều cần người bấm — kể cả nút 'Alert', nó
+> chỉ tạo một rule CẢNH BÁO, không chặn gì cả."*
+
+---
+
+### Bước 3 — Sinh rule & test trước khi chặn ⏱ ~3 phút
+
+Bấm **Make rule** trên event vừa tạo → chuyển sang tab RULES, flow được nạp sẵn (nếu dùng
+inject-flag test thì sẽ không có flow Tulip thật — nói rõ với khán giả, dùng Quick pick tay thay
+thế, hoặc chuẩn bị trước một flow thật từ 0-C's traffic thật nếu có).
+
+1. Chọn phần "độc hại" (Quick pick hoặc bôi đen) → Use selection.
+2. **SURICATA (panel 3a):** Generate → Test on recent traffic → xem số lần khớp, IP nào khớp →
+   Add to ruleset → Test syntax & Apply. Chỉ cho khán giả thấy bảng có cấu trúc (#, SID, Message,
+   Added) hiện ngay dòng mới với nhãn "not applied yet" trước khi Apply, rồi đổi thành timestamp
+   thật sau khi Apply.
+3. **CTF_PROXY (panel 3b, chỉ nếu có vulnbox thật + ctf_proxy đã deploy):** nếu vulnbox có nhiều
+   service, chọn đúng service ở dropdown trước. Generate & insert → Check & Upload.
+
+**Nói với khán giả:**
+
+> *"Suricata không bao giờ chặn — nó đọc lại pcap sau khi traffic đã xảy ra, cấu trúc này không
+> có khả năng drop packet thật. Chặn thật chỉ có ở ctf_proxy (trên vulnbox) hoặc iptables. Luôn
+> Test on recent traffic trước — nếu rule khớp cả traffic của checker, rule quá rộng."*
+
+---
+
+### Bước 4 — Rule đang chạy ở đâu (APPLIED) ⏱ ~2 phút
+
+Chuyển sang tab APPLIED — rule vừa Apply/Upload đã xuất hiện ngay (tab này tự tải lại mỗi lần mở,
+không cần F5). Chỉ cho khán giả: số lần rule đã kêu/chặn, IP nguồn, và — nếu demo trên vulnbox có
+nhiều service — cột "Service" phân biệt rule nào thuộc service nào.
+
+**Nói với khán giả:**
+
+> *"Đây là nơi duy nhất trả lời câu hỏi: rule nào đang sống, ở đâu, chặn/kêu bao nhiêu lần. Nếu
+> một rule ctf_proxy chặn trúng IP của checker, nó sẽ hiện ngay ở đây — và việc cần làm là Pause
+> filtering, không phải đoán."*
+
+---
+
+### Bước 5 — Kill switch & SLA ⏱ ~2 phút
+
+Tab SERVICES:
 
 ```bash
-cat /tmp/demo_ioc_result.json | python3 -m json.tool
-```
-
-**Output đã verified:**
-
-```json
-{
-  "attacker_ip": "10.60.9.9",
-  "flag": "QCYM5CGWGP8KI34N0WRXULDJ7GZTDB=",
-  "technique": "HTTP flag exfiltration",
-  "confidence": "HIGH",
-  "timestamp": "..."
-}
+# (tùy chọn, nếu muốn demo qua terminal thay vì click UI)
+curl -s -X POST http://localhost:8080/api/services/ctfproxy/pause_filter | python3 -m json.tool
+curl -s http://localhost:8080/api/services | python3 -m json.tool
+curl -s -X POST http://localhost:8080/api/services/ctfproxy/resume_filter | python3 -m json.tool
 ```
 
 **Nói với khán giả:**
 
-> *"Đây là output từ `foundation-sec-8b-chat` — model bảo mật chuyên biệt dựa trên Llama-3.1-8B.
-> Nó đọc toàn bộ flow thật từ Tulip qua MCP layer — read-only, Postgres role riêng, write bị
-> reject ở tầng DB — rồi ra IOC có cấu trúc JSON: attacker IP, flag, kỹ thuật.
-> Trên CPU không GPU, mất ~2 phút. Với GPU, vài giây.
-> Output JSON này sẵn sàng feed vào automation để ban IP hoặc patch rule tự động."*
+> *"Pause filtering tắt TẤT CẢ rule chặn của ctf_proxy ngay lập tức, trên mọi service cùng lúc —
+> không để sót 1 service vẫn đang chặn khi tưởng đã dừng hết. Traffic vẫn qua, không service nào
+> bị rớt. Đây là nút bấm đầu tiên khi nghi ngờ một rule đang làm hại SLA, trước khi debug."*
 
-**Phương án B (nếu muốn live):**
-
-```bash
-# Gõ xong thì ngay lập tức quay sang nói về architecture diagram
-curl -s -X POST http://localhost:5001/analyze \
-  -H "Content-Type: application/json" \
-  -d "{\"flow_id\": \"$REAL_FLOW_ID\"}" &
-echo "LLM đang phân tích ngầm (est. ~120s)…"
-```
-
----
-
-### Bước 4 — Phòng thủ: harness.py — SLA xanh ⏱ ~2 phút
-
-```bash
-cd offline-bundle/repos/ctf_proxy
-python3 harness.py
-```
-
-**Output mong đợi (đã verified):**
-
-```
-[harness] legit login: PASS — b'HTTP/1.1 200 OK\r\ndate: ...'
-[harness] SQLi blocked: PASS — b'CTFMONITOR_BLOCKED svc1 sqli_login'
-[harness] RESULT: PASS — safe to deploy (filter already live via hot-reload)
-```
-
-**Nói với khán giả:**
-
-> *"harness.py mô phỏng song song attacker và player hợp lệ.
-> Attacker bị block, player vẫn 200 — SLA xanh.
-> Đây là bằng chứng rule bảo vệ được triển khai đúng: không over-block."*
+Nếu có watchdog SLA đang chạy: chỉ MONITOR tab, cột watchdog — service vẫn ✓ UP suốt quá trình.
 
 ---
 
@@ -401,91 +199,43 @@ python3 harness.py
 
 > Khi một bước hỏng live: không tắt mic, không xin lỗi quá lâu, chuyển fallback ngay.
 
----
-
-### FB-1: ctf_proxy không BLOCK (Bước 1 hỏng)
-
-**Đã biết:** Filter hot-reload đôi khi không ăn (STATUS.md). **Cũng đã biết:** nếu restart
-MỘT mình container `proxy` (ví dụ để bật verbose debug) mà không restart `nginx` theo, `nginx`
-giữ IP cũ đã cache cho hostname `proxy` → mọi request treo/timeout cho tới khi restart `nginx`
-cùng lúc. **Luôn restart cả hai cùng nhau, không bao giờ restart riêng `proxy`:**
+### FB-1: Không có event mới xuất hiện (Bước 1 hỏng)
 
 ```bash
-(cd offline-bundle/repos/ctf_proxy && docker compose restart proxy nginx)
-sleep 5
-python3 offline-bundle/repos/ctf_proxy/harness.py   # retry
+# Gọi lại test endpoint — idempotent, gọi bao nhiêu lần cũng được
+curl -s -X POST http://127.0.0.1:9998/test/inject-flag
 ```
 
-**Nếu vẫn fail → trình fallback log:**
+Nếu endpoint đó cũng không trả lời: `docker logs ctf-detection --tail 30` xem lỗi, chuyển sang
+trình bày trực tiếp tab APPLIED/RULES với rule có sẵn từ trước (không cần event mới để demo các
+tab đó).
+
+### FB-2: ctf_proxy không có / vulnbox không reachable (Bước 3/5 phần ctf_proxy hỏng)
+
+> *"Phần này cần một vulnbox thật đang chạy — hôm nay môi trường demo không có sẵn một cái, nên
+> tôi sẽ chỉ phần Suricata (luôn chạy local, không cần vulnbox) và SLA watchdog thay thế."*
+
+Bỏ qua panel 3b, chỉ demo panel 3a (Suricata) — không cần SSH/vulnbox gì cả.
+
+### FB-3: Dashboard không mở
 
 ```bash
-cat /tmp/demo_fallback/ctf_proxy_pass.log
+bash health-check.sh
+MODE=contest bash deploy-all.sh    # (hoặc MODE=prep, giữ đúng mode đã dùng ở Pre-flight)
 ```
 
-> *"Log từ lần verify trước — hệ thống đã pass. Tôi sẽ debug sau buổi này."*
-
----
-
-### FB-2: LLM treo hoặc timeout (Bước 3 hỏng)
-
-**Kiểm tra nhanh:**
-
-```bash
-docker exec ctf-ioc-brain python3 -c "import urllib.request,os; print(urllib.request.urlopen(os.environ['OLLAMA_HOST']+'/api/tags', timeout=3).status)"
-```
-
-Nếu fail → gateway lật. Recovery:
-
-```bash
-bash teardown.sh && bash bringup.sh
-# Đợi ~3 phút
-```
-
-**Nếu không có thời gian recover → trình kết quả đã lưu:**
-
-```bash
-cat /tmp/demo_ioc_result.json | python3 -m json.tool
-```
-
-> *"Output từ lần chạy verify — attacker_ip, flag đều đúng.
-> Vấn đề gateway là đặc thù môi trường podman — không ảnh hưởng deployment thật."*
-
----
-
-### FB-3: Detection không ra alert (Bước 2 hỏng)
-
-```bash
-docker logs ctf-detection --tail=30
-# Nếu không rõ nguyên nhân → trình fallback
-cat /tmp/demo_fallback/detection_pass.log
-```
-
-> *"Detection đã verified — latency 21ms. Log từ lần pass."*
-
----
-
-### FB-4: harness.py fail (Bước 4 hỏng)
-
-```bash
-cat /tmp/demo_fallback/harness_pass.log
-```
-
-> *"Harness đã pass trước buổi demo. Tôi debug sau."*
+Nếu vẫn không lên kịp giờ demo: trình bày qua `curl` trực tiếp các endpoint (`/api/applied`,
+`/api/rules/suricata`, `/api/events...`) + giải thích JSON trả về, không cần UI.
 
 ---
 
 ## Phần 4 — KHÔNG ĐƯA VÀO DEMO
 
-Những mục sau **không được nhắc hoặc demo** dù khán giả hỏi:
-
 | Mục | Lý do |
 |---|---|
-| **Dashboard UI (browser)** | Chỉ verified ở API layer. Visual rendering chưa kiểm bằng mắt. Mở browser live có thể ra layout hỏng. |
-| **OS Watchdog** | Script tồn tại nhưng chưa deploy, chưa chạy thật lần nào. Không có evidence pass/fail. |
-| **ML Fingerprint (DBSCAN)** | Container đang warmup (1/3 ticks). Chưa đủ data để clustering có nghĩa. Kết quả sẽ vô nghĩa. |
-| **RAG / AnythingLLM vault** | `vault/` hoàn toàn trống. Không có document nào indexed. Không có workspace RAG nào hoạt động. |
-| **Tulip `services/configurations.py`** | Tulip ở đây dùng `.env` (OpenAttackDefenseTools fork) — không phải format `configurations.py`. Nhắc đến gây nhầm. |
-| **MCP write-rejection `/mongo/test`** | Chưa verify endpoint này. Chỉ verify Postgres write-rejection trực tiếp — đừng nhắc Mongo. |
+| **mock-vulnbox qua ctf_proxy** | Không có nhánh local/compose nào nối ctf_proxy vào mock-vulnbox trong layout hiện tại — chỉ demo được ctf_proxy thật khi có vulnbox thật reachable qua SSH. |
+| **Bất cứ thứ gì liên quan LLM/AI** | Đã gỡ bỏ hoàn toàn khỏi repo. Không có "Ask LLM", không có IOC JSON tự sinh. |
+| **ml-fingerprint (DBSCAN)** | Chỉ chạy `MODE=prep` và cần `services.json.ml_classifier.enabled=true` — kết quả cụm cần đủ traffic mới có nghĩa, không đáng tin cho 1 request demo. |
 
 ---
 
@@ -493,43 +243,27 @@ Những mục sau **không được nhắc hoặc demo** dù khán giả hỏi:
 
 ```bash
 cd /home/poeency/Documents/Setup_tool
-
-# 1. Teardown
-bash teardown.sh
-
-# 2. Xoá state tạm
-rm -rf /tmp/demo_fallback /tmp/demo_ioc_result.json
-
-# 3. Bringup lại
-bash bringup.sh
-
-# 4. Chạy lại toàn bộ Pre-flight từ Phần 0
-#    (bắt buộc: 0-B health check → 0-C gateway verify → 0-D warm-up LLM → 0-E fallback logs)
+MODE=contest bash teardown.sh     # dùng đúng MODE đã bringup ở Pre-flight 0-A
+bash deploy-all.sh                 # cùng MODE, bringup lại
+# Chạy lại Pre-flight 0-B/0-C
 ```
 
-**Thời gian reset:** ~5 phút (teardown + bringup) + ~2 phút warm-up LLM = **~7 phút tối thiểu**.
+**Thời gian reset:** ~3-5 phút (teardown + bringup, không còn warm-up LLM 2 phút như bản cũ).
 
 ---
 
 ## Checklist nhanh — Invite khán giả khi tất cả ô này tick xanh
 
 ```
-[ ] bringup.sh hoàn thành — không có dòng ERROR
-[ ] detection /health → {"status": "ok"}
-[ ] dashboard /health → {"status": "ok"}
-[ ] ioc-brain /health → {"status": "ok", "ollama": "reachable"}
-[ ] Tulip UI port 5000 → HTTP 200
-[ ] redis-cli ping → PONG
-[ ] ioc-brain → Ollama: thấy "foundation-sec-8b-chat" trong /api/tags
-[ ] mcp-tulip → Postgres: "Flows in DB" ≥ 1
-[ ] Warm-up /analyze đã trả về JSON (kể cả confidence thấp)
-[ ] REAL_FLOW_ID đã xác nhận và lưu lại
-[ ] /tmp/demo_ioc_result.json có attacker_ip và flag đúng
-[ ] /tmp/demo_fallback/ có đủ 3 file: ctf_proxy_pass.log, detection_pass.log, harness_pass.log
-[ ] Terminal split sẵn: trái=command, phải=docker logs -f ctf-detection
-[ ] Một curl SQLi test cuối cùng xác nhận ctf_proxy đang chặn đúng
+[ ] deploy-all.sh hoàn thành — không có dòng ERROR/FATAL
+[ ] dashboard HTTP 200, Tulip UI HTTP 200, redis PONG
+[ ] /test/inject-flag trả {"status":"injected"} và event xuất hiện trong EVENTS tab
+[ ] Terminal theo dõi: docker logs -f ctf-detection (đã chạy từ trước)
+[ ] (nếu demo ctf_proxy thật) vulnbox SSH reachable, ctf_proxy container đang Up
+[ ] Đã quyết định trước: demo bằng inject-flag test, hay chờ traffic thật — không quyết định giữa buổi
 ```
 
 ---
 
-*DEMO.md — cập nhật 2026-10-08. Chỉ dựa trên STATUS.md items có nhãn PASS.*
+*DEMO.md — cập nhật 2026-10-14. Không còn LLM/mock-vulnbox-qua-ctf_proxy; dựa trên các API đã
+verify thật trong `docs/STATUS.md` cùng ngày.*

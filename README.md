@@ -33,8 +33,10 @@ one machine:
 - **Get paged** the moment a service — or the edge proxy itself — goes down.
 
 It's a monitoring hub, not a CTF platform: it doesn't run your vulnerable services for you
-(a toy `mock-vulnbox` is included only so the whole pipeline can be exercised on a laptop
-before competition day).
+(a toy `mock-vulnbox` is included only to rehearse the **capture/detect/dashboard** half of the
+pipeline on a laptop before competition day — it has no published port and isn't fronted by
+`ctf_proxy` in this layout, so the edge-mitigation step itself can only be rehearsed against a
+real, SSH-reachable vulnbox; see [`docs/GOLIVE.md`](docs/GOLIVE.md)).
 
 ## Architecture
 
@@ -80,8 +82,10 @@ No LLM / generative-AI path exists anywhere in this repo (removed by explicit de
 `docs/STATUS.md`). Two layers do the actual work, plus an optional non-generative hint layer:
 
 1. **Edge mitigation** — [`ctf_proxy`](https://github.com/ByteLeMani/ctf_proxy) (a real
-   upstream project, not reinvented) sits in front of your services. Python filter modules
-   decide per-request whether to drop traffic; a blocked connection gets a raw
+   upstream project, not reinvented) sits in front of **every TCP service** listed in
+   `services.json` (one deploy covers all of them; UDP services aren't eligible — ctf_proxy
+   itself doesn't proxy UDP, use the content-based iptables fallback for those). Python filter
+   modules decide per-request whether to drop traffic; a blocked connection gets a raw
    `KEYWORD SERVICE ATTACK_NAME` reply so it's instantly greppable in a pcap — there's no
    HTTP status line, so don't expect a `403` from `curl`.
 2. **Detection & forensics** — [Tulip](https://github.com/OpenAttackDefenseTools/tulip)
@@ -116,11 +120,14 @@ Open the dashboard at `http://localhost:8080`. Full walkthrough, troubleshooting
 air-gapped restore path are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md). Need to change something
 mid-competition? [`CONFIG.md`](CONFIG.md), not this file.
 
-**Verify the edge-mitigation loop works** (legit traffic passes, an attack gets blocked, SLA
-stays green):
+**Verify the edge-mitigation loop works** against a real vulnbox (legit traffic passes, an
+attack gets blocked, SLA stays green) — this needs an SSH-reachable vulnbox configured in
+`services.json`, not the local `mock-vulnbox`:
 
 ```bash
-cd offline-bundle/repos/ctf_proxy && python3 harness.py
+bash contest-runtime/defense/deploy-ctfproxy.sh
+# then exercise it from the Dashboard's RULES tab (3b): build a rule, Check & Upload, confirm
+# it blocks the attack and the legit path still returns 200 — see docs/RULE_COOKBOOK.md.
 ```
 
 ## One config, every tool

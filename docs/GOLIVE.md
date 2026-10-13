@@ -1,27 +1,27 @@
-# GOLIVE.md — Chuyển từ test (mock-vulnbox) sang thi thật
+# GOLIVE.md — Chuyển từ luyện tập (mock-vulnbox) sang thi thật
 
-> Viết trong lúc diễn tập (2026-10-10), để dùng lại khi thi thật. Đọc từ trên xuống, làm theo
-> đúng thứ tự. Đừng nhảy cóc.
+> Viết ban đầu trong lúc diễn tập (2026-10-10), cập nhật lại sau khi ctf_proxy thật đã deploy và
+> test thành công trên vulnbox thật (DFCD practice arena) — 2026-10-14. Đọc từ trên xuống, làm
+> theo đúng thứ tự. Đừng nhảy cóc.
+>
+> Không có LLM/AI nào trong hệ thống này — mọi quyết định chặn là người tự đọc flow rồi bấm.
 
 ## Tổng quan sự khác biệt
 
-| | Test (hiện tại) | Thi thật |
+| | Luyện tập (`MODE=prep`) | Thi thật (`MODE=contest`) |
 |---|---|---|
 | Vulnbox | `mock-vulnbox` container, giả | VM thật của bạn, do ban tổ chức cấp |
-| Traffic vào Tulip | Đọc file pcap tĩnh trong `traffic/` | Live stream qua `PCAP_OVER_IP` từ pcap-broker trên vulnbox |
-| ctf_proxy | Chạy, chặn SQLi giả | **CHƯA chạy** — xem Phase 2 ở dưới |
-| `services.json` | IP/port giả (`10.0.0.2`, `svc1`/`svc2`) | IP/port/flag regex **thật** do ban tổ chức cho |
-
-Hôm nay (diễn tập) bạn chọn: **chỉ bật Phase 1 (monitor/detect), chưa bật ctf_proxy thật.**
-Quyết định này hợp lý — ctf_proxy auto-block traffic sai có thể làm rớt SLA, nên cần test kỹ
-trước khi bật thật trong lúc thi (không có thời gian debug giữa trận).
+| Traffic vào Tulip | Đọc file pcap tĩnh trong `traffic/`, hoặc live qua `PCAP_OVER_IP` nếu vulnbox có pcap-broker | Giống hệt — không phân biệt theo MODE, phân biệt theo cách capture (xem Phase 0, câu 3) |
+| ctf_proxy | Front `mock-vulnbox` (nếu bật) | Front TẤT CẢ service `"proto": "tcp"` thật trong `services.json` — **đã code xong, đã test live** (xem Phase 2) |
+| `services.json` | IP/port giả | IP/port/flag regex **thật** do ban tổ chức cho — đổi được bất cứ lúc nào, mọi nơi đọc port đều đọc động từ file này |
 
 ---
 
 ## PHASE 0 — Khung 5 câu hỏi (dùng cho MỌI môi trường thi mới, không riêng gì lần này)
 
 Mỗi giải có hạ tầng khác nhau (VM riêng, container share host, có/không VPN...). Đừng đoán —
-trả lời đúng 5 câu này rồi map thẳng vào `services.json`, không cần sửa code trừ câu 3.
+trả lời đúng 5 câu này rồi map thẳng vào `contest-runtime/config/services.json`, không cần sửa
+code trừ câu 3 nếu rơi vào trường hợp hiếm.
 
 | # | Câu hỏi | Lệnh kiểm tra nhanh | Map vào field nào |
 |---|---|---|---|
@@ -29,30 +29,29 @@ trả lời đúng 5 câu này rồi map thẳng vào `services.json`, không c�
 | 2 | Vulnbox của mình: máy riêng hay container share host? | `ssh <key> -p <port> <user>@<ip> hostname` | `vulnbox.ip`, `ssh_user`, `ssh_port` |
 | 3 | **Có chỗ nào chạy `tcpdump` với quyền root, thấy traffic thật không?** | xem bảng quyết định dưới | quyết định cách bắt gói tin (xem dưới) |
 | 4 | Flag format thật? | hỏi ban tổ chức / đọc rules | `flag.regex` |
-| 5 | Port/service thật cần theo dõi? | hỏi ban tổ chức / `nmap`/`curl` thử | `services[]` |
+| 5 | Port/service thật cần theo dõi — **có thể nhiều hơn 1, protocol khác nhau** | hỏi ban tổ chức / `nmap`/`curl`/`nc` thử | `services[]` — xem format ở Bước 1 dưới |
 
-**Câu 3 — 3 nhánh có sẵn, không cần code mới, chỉ chọn đúng nhánh:**
+**Câu 3 — các nhánh có sẵn, không cần code mới, chỉ chọn đúng nhánh:**
 
 | Tình huống | Làm gì |
 |---|---|
-| Chưa có gì, chỉ muốn test tool | `mock_vulnbox.enabled: true` (container giả, local) |
+| Chưa có gì, chỉ muốn test tool | `MODE=prep bash deploy-all.sh` (bật `mock-vulnbox`, container giả, local) |
 | Vulnbox tự chạy sẵn pcap-broker (hiếm, ban tổ chức phải set up) | `vulnbox.live_pcap_broker: true` — Tulip nhận live stream qua `PCAP_OVER_IP` |
-| Có root+tcpdump ở ĐÂU ĐÓ thấy traffic thật (vulnbox thật, hoặc máy admin khác như trường hợp DFCD) — **nhưng không có broker** | `bash vulnbox-deploy/deploy-capture-pull.sh` — tcpdump remote + rsync kéo pcap về `traffic/` mỗi 15s, Tulip đọc qua directory-watch (không cần sửa `PCAP_OVER_IP`, mặc định đã là chế độ này) |
+| Có root+tcpdump ở ĐÂU ĐÓ thấy traffic thật (vulnbox thật, hoặc máy admin khác như trường hợp DFCD) — **nhưng không có broker** | `bash contest-runtime/monitor/deploy-capture-pull.sh` — tcpdump remote + rsync kéo pcap về `traffic/` mỗi 15s, Tulip đọc qua directory-watch (mặc định đã là chế độ này, `deploy-all.sh` tự gọi) |
 
-**Ví dụ thật đã làm (DFCD practice arena, 2026-10-10):** team key (`vulnbox.ssh_user/ssh_port`)
+**Ví dụ thật đã làm (DFCD practice arena, team-03):** team key (`vulnbox.ssh_user/ssh_port`)
 chỉ vào được container `public-proxy`, không có `tcpdump`/root thật trong đó. Nhưng có SSH
 admin riêng (`~/.ssh/config` alias `dfcd-vbox`, ProxyJump qua gameserver) thấy được tới
-`vulnbox-host` — tìm đúng bridge Docker của network `team-01_proxy-public`
-(`docker network inspect <net> --format '{{.Id}}'` → `br-<12 ký tự đầu của Id>`), rồi chạy
-tcpdump ở đó. Thêm 2 field mới vào `vulnbox.*`: `capture_ssh_alias` (dùng SSH alias có sẵn,
-không cần tự dựng lại ProxyJump trong script), `docker_bridge`.
+`vulnbox-host`. Hai field dùng cho trường hợp này: `vulnbox.capture_ssh_alias` (SSH alias có sẵn,
+không cần tự dựng lại ProxyJump trong script), `vulnbox.capture_iface` (để `"auto"` thì script tự
+dò interface external qua `ip route`, chỉ set tay nếu `eth0` không phải nơi IP public nằm).
 
 **Lưu ý an toàn:** đừng commit/push `services.json` lên git khi nó đang chứa IP/thông tin hạ
-tầng thi thật — xem cảnh báo ở cuối Phase 1 dưới.
+tầng thi thật của một giải chưa kết thúc.
 
 ---
 
-## PHASE 1 — Monitor + Detect (làm được ngay hôm nay)
+## PHASE 1 — Monitor + Detect
 
 ### Bước 0 — Thu thập thông tin từ ban tổ chức
 
@@ -62,13 +61,14 @@ Trước khi đổi config, cần có:
 - [ ] Regex flag thật (ví dụ `ENOFLAG[A-Za-z0-9+/=]{32}` — mỗi giải khác nhau)
 - [ ] CIDR của teams network (để phân biệt traffic đồng nghiệp vs đối thủ)
 - [ ] URL submit flag (gameserver) — không bắt buộc cho monitor, chỉ cần nếu muốn tự động nộp
-- [ ] Danh sách service + port thật trên vulnbox (tên, port, http hay raw tcp)
+- [ ] Danh sách **từng** service + port thật trên vulnbox (tên, port, http hay raw tcp hay udp,
+      và tên service trong docker-compose của vulnbox đang bind port đó nếu biết — cần cho Phase 2)
 - [ ] IP của máy monitor này trên mạng thi (dùng lệnh `ip addr` hoặc hỏi ban tổ chức)
 
-### Bước 1 — Sửa `services.json`
+### Bước 1 — Sửa `contest-runtime/config/services.json`
 
 ```bash
-nano services.json
+nano contest-runtime/config/services.json
 ```
 
 Sửa đúng các field sau (đừng đổi tên field, chỉ đổi giá trị):
@@ -78,7 +78,7 @@ Sửa đúng các field sau (đừng đổi tên field, chỉ đổi giá trị)
   "ip": "<IP vulnbox thật>",
   "ssh_user": "<user SSH thật>",
   "ssh_port": 22,
-  "capture_iface": "eth0",          // interface mạng thật trên vulnbox — hỏi ban tổ chức nếu không chắc
+  "capture_iface": "auto",          // "auto" tự dò; set tay nếu cần
   "pcap_broker_port": 4242
 },
 "monitor_host": {
@@ -90,45 +90,45 @@ Sửa đúng các field sau (đừng đổi tên field, chỉ đổi giá trị)
   "submit_url": "<URL submit thật, nếu có>"
 },
 "teams_cidr": "<CIDR mạng teams thật>",
-"mock_vulnbox": {
-  "enabled": false        // ⚠️ QUAN TRỌNG — xem giải thích dưới
-},
 "services": [
-  { "name": "...", "port": ..., "proto": "tcp", "layer": "l7-http" },
-  ...                      // sửa đúng danh sách service thật trên vulnbox
+  {
+    "name": "web", "port": 8003, "proto": "tcp", "layer": "l7-http",
+    "compose_service": "public-proxy"   // tên service trong compose của vulnbox — cần cho Phase 2
+  },
+  {
+    "name": "pwn1", "port": 9999, "proto": "tcp", "layer": "l4-raw",
+    "compose_service": "pwn-service"    // ví dụ: service raw TCP (không phải HTTP) — khai layer "l4-raw"
+  },
+  {
+    "name": "dns1", "port": 5353, "proto": "udp", "layer": "l4-udp"
+    // UDP: vẫn capture/alert được, nhưng KHÔNG dùng được ctf_proxy ở Phase 2 — xem lưu ý dưới
+  }
 ]
 ```
 
-**`mock_vulnbox.enabled: false` làm 3 việc tự động** (đã code sẵn, không cần sửa gì khác):
-1. `bringup.sh` **không khởi động** container `mock-vulnbox` nữa.
-2. `bringup.sh` **không khởi động** `ctf_proxy` nữa (vì nó chưa được wire để front vulnbox
-   thật — xem Phase 2).
-3. `generators/gen-tulip-env.py` tự đổi `PCAP_OVER_IP` từ rỗng sang
-   `host.docker.internal:<pcap_broker_port>` — Tulip sẽ nhận traffic **live** từ vulnbox
-   thay vì đọc file pcap tĩnh.
+Mỗi service trong mảng được capture/giám sát độc lập — khai **bao nhiêu service cũng được**,
+không giới hạn 1. `proto` ∈ `tcp`/`udp`. `layer` quyết định ctf_proxy đọc service đó như HTTP
+(`l7-http`/`l7-https`) hay raw TCP (`l4-raw`) ở Phase 2; `l4-udp` nghĩa là Phase 2 sẽ tự bỏ qua
+service này (in cảnh báo, không lỗi) — dùng chặn-theo-nội-dung (SERVICES tab) cho UDP.
 
 ```bash
-bash validate-config.sh     # phải PASS trước khi tiếp tục
+bash contest-runtime/config/validate-config.sh     # phải PASS trước khi tiếp tục
 ```
 
-### Bước 2 — Deploy lên vulnbox thật (qua SSH)
-
-> ⚠️ **3 script này chưa từng được chạy thật trên vulnbox thật trong session trước** (chỉ
-> code xong, chưa test — xem `docs/STATUS.md`). Deploy xong, kiểm tra kỹ output từng bước,
-> đừng tin "chạy xong không lỗi" là đủ.
+### Bước 2 — Deploy capture + honeytoken + OS-watchdog lên vulnbox thật (qua SSH)
 
 ```bash
 # Đảm bảo SSH vào vulnbox được trước (test tay 1 lần):
 ssh -p 22 <ssh_user>@<vulnbox_ip> echo ok
 
-# 1. Deploy capture (tcpdump/pcap-broker) — bắt buộc, không có cái này Tulip không thấy gì
-bash vulnbox-deploy/deploy-capture.sh
+# 1. Deploy capture (tcpdump + rsync kéo pcap về) — bắt buộc
+bash contest-runtime/monitor/deploy-capture-pull.sh
 
-# 2. Deploy OS watchdog (file-integrity + process monitor) — khuyến nghị
-bash vulnbox-deploy/deploy-os-watchdog.sh
+# 2. Deploy honeytoken (đặt flag giả làm bẫy) — khuyến nghị
+bash contest-runtime/detection/deploy-honeytoken.sh
 
-# 3. Deploy honeytoken (đặt flag giả làm bẫy) — khuyến nghị
-bash vulnbox-deploy/deploy-honeytoken.sh
+# 3. Deploy OS watchdog (file-integrity + process monitor) — khuyến nghị
+bash contest-runtime/watchdog/deploy-os-watchdog.sh
 ```
 
 Nếu script nào fail: đọc lỗi SSH trước (sai user/key/port là nguyên nhân phổ biến nhất),
@@ -137,22 +137,19 @@ Nếu script nào fail: đọc lỗi SSH trước (sai user/key/port là nguyên
 ### Bước 3 — Bật hệ thống monitor
 
 ```bash
-bash bringup.sh
+MODE=contest bash deploy-all.sh
 ```
 
-Kỳ vọng thấy trong log:
-- `mock_vulnbox.enabled=false — skipping the toy vulnerable app (real vulnbox mode)`
-- `mock_vulnbox.enabled=false — skipping ctf_proxy (not yet wired for a real vulnbox...)`
-- Health checks: Detection/Dashboard/IOC-Brain/Tulip UI đều `UP`
+Kỳ vọng thấy: preflight OK → validate-config PASS → capture start → honeytoken/OS-watchdog deploy
+→ ctf_proxy **chỉ nếu** `ctf_proxy.insertion.mode` là `"docker-compose"` trong config (xem Phase 2
+— có thể để Phase 1 chạy một mình trước, deploy ctf_proxy sau khi đã quan sát ổn) → health check
+tất cả UP.
 
 ### Bước 4 — Xác nhận traffic thật đang vào
 
 ```bash
-# Assembler phải thấy traffic LIVE, không phải "Monitoring dir: /traffic"
+# Assembler phải thấy traffic LIVE
 docker logs tulip-assembler-1 --tail 20
-# Kỳ vọng: "Connecting to PCAP-over-IP: host.docker.internal:4242" rồi KHÔNG còn
-# "connection refused" liên tục — nếu vẫn refused, pcap-broker trên vulnbox
-# chưa chạy đúng, quay lại Bước 2.
 
 # Dashboard — mở trình duyệt
 xdg-open http://localhost:8080
@@ -161,41 +158,55 @@ xdg-open http://localhost:8080
 docker logs ctf-watchdog --tail 10
 ```
 
-**Dấu hiệu mọi thứ ổn:** `assembler` không còn log lỗi connection refused liên tục, Tulip UI
-(`localhost:3000`) hiện flow thật đang chạy qua, watchdog không báo `SERVICE DOWN` liên tục.
+**Dấu hiệu mọi thứ ổn:** Tulip UI (`localhost:3000`) hiện flow thật đang chạy qua, watchdog
+không báo `SERVICE DOWN` liên tục, tab EVENTS trên dashboard có event mới.
 
 ---
 
-## PHASE 2 — ctf_proxy thật (CHƯA LÀM — để sau)
+## PHASE 2 — ctf_proxy thật (ĐÃ CODE XONG, ĐÃ TEST LIVE)
 
-Ghi lại để không quên khi cần làm:
-
-**Vấn đề:** `ctf_proxy` hiện chỉ biết front `mock-vulnbox` (container ảo trên cùng máy, cùng
-Docker network). Để chặn traffic thật trước vulnbox thật, cần **redirect traffic trên chính
-vulnbox** vào `ctf_proxy` — việc này **chưa có script**, cần làm thêm:
-
-1. Viết `vulnbox-deploy/deploy-ctfproxy-redirect.sh`: SSH vào vulnbox, dùng `iptables` NAT
-   (`PREROUTING`/`REDIRECT` hoặc `DNAT`) để chuyển port thật (ví dụ 9001) sang port mà
-   `ctf_proxy` đang listen trên máy monitor — **hoặc** chạy hẳn `ctf_proxy` ngay trên vulnbox
-   nếu vulnbox đủ tài nguyên (tránh thêm 1 hop network).
-2. Sửa `generators/gen-ctfproxy.py`: khi `mock_vulnbox.enabled=false`, `target_ip`/`target_port`
-   phải trỏ vào **service thật trên vulnbox** (IP thật + port thật), không phải
-   `mock-vulnbox` hostname.
-3. **Test bằng `harness.py` trước khi tin** — và test ở giờ nghỉ/tick không quan trọng trước,
-   không bật lúc đang bị tính điểm SLA liên tục. Risk thật: filter block sai traffic hợp lệ
-   của checker bot → mất điểm SLA cả trận.
-4. Có kế hoạch rollback nhanh: nếu ctf_proxy gây lỗi, phải tắt được trong vài giây
-   (`docker compose down` trên `offline-bundle/repos/ctf_proxy/`) mà không làm rớt service.
-
-**Khuyến nghị:** chỉ bật Phase 2 sau khi Phase 1 đã chạy ổn ít nhất 1 tick đầy đủ, và có thời
-gian test riêng (không phải lúc đang live).
-
----
-
-## Rollback về chế độ test
+Khác với bản viết lúc diễn tập (lúc đó Phase 2 "chưa làm"), phần này giờ **đã hoạt động thật** —
+`contest-runtime/defense/deploy-ctfproxy.sh` tự:
+1. Đọc **mọi** service `"proto": "tcp"` trong `services.json` (bỏ qua `"proto": "udp"` — ctf_proxy
+   không hỗ trợ UDP, không có nhánh nào để làm được việc này, dùng chặn-theo-nội-dung thay thế).
+2. Với mỗi service: xác minh port đang bind đúng `compose_service` khai trong config, gỡ port đó
+   khỏi compose file gốc (có backup), nối ctf_proxy vào, build+start.
+3. Verify lại traffic thật vẫn chạy qua từng port sau khi xong.
 
 ```bash
-bash teardown.sh
-# services.json: đổi mock_vulnbox.enabled lại thành true
-bash bringup.sh
+bash contest-runtime/defense/deploy-ctfproxy.sh
+```
+
+An toàn khi chạy lại nhiều lần: service đã có ctf_proxy rồi thì bị skip (không tìm thấy port
+binding cũ để gỡ nữa), không làm gì — không có rủi ro double-insert. Rule đang áp trên filter của
+một service **không bị mất** khi chạy lại script (đã verify: rsync không đụng tới
+`filter_modules/<service>/` đã tồn tại, nó chỉ tạo file mới nếu service đó thật sự chưa từng được
+deploy).
+
+**Vẫn đúng với bản cũ — risk thật, vẫn phải cẩn thận:**
+- ctf_proxy auto-block traffic sai có thể làm rớt SLA. **Luôn Test on recent traffic** (tab RULES)
+  trước khi Check & Upload, dù đã tin filter đúng.
+- Downtime ngắn (vài giây) mỗi lần một service được chuyển port qua ctf_proxy lần đầu, hoặc mỗi
+  lần `docker compose up` phải recreate service gốc — tránh chạy lúc đang bị tính SLA liên tục nếu
+  không bắt buộc; chạy ở giờ nghỉ/tick không quan trọng nếu có thể.
+- Có kế hoạch rollback nhanh: SERVICES tab → ctf_proxy → **Uninstall (emergency)** — trả port về
+  TẤT CẢ service gốc cùng lúc trong vài giây, dùng khi chính ctf_proxy là vấn đề (không phải 1
+  rule cụ thể — nếu chỉ 1 rule gây hại, dùng **Pause filtering** hoặc Rollback rule đó thôi, không
+  cần Uninstall).
+
+**Service raw TCP (không phải HTTP):** rule builder trên tab RULES tự biết chỉ cho chọn
+`target: raw` (đọc bytes thô, không có url/path/param) khi bạn chọn đúng service đó ở dropdown.
+
+**Service UDP:** không xuất hiện trong dropdown ctf_proxy ở tab RULES (không eligible). Dùng
+SERVICES tab → "Fallback block — theo NỘI DUNG" (iptables `--string` match, hoạt động bất kể
+TCP/UDP) nếu cần chặn chủ động.
+
+---
+
+## Rollback về chế độ luyện tập
+
+```bash
+MODE=contest bash teardown.sh
+# services.json: chuyển sang file luyện tập, hoặc đơn giản chạy lại ở MODE=prep
+MODE=prep bash deploy-all.sh
 ```

@@ -39,7 +39,7 @@ Dashboard hỏng hẳn? Xem mục cuối ("Không mở được Dashboard").
 | Không có traffic mới | Tab SERVICES → *Traffic capture* → **Start**. Vẫn không được → vulnbox mất kết nối (xem bảng dưới) |
 | BTC đổi IP / port vulnbox | Tab CONFIG → Quick edit *Vulnbox IP* / *Service public port* → **Validate** → **Save & apply** |
 | Đổi flag regex / URL nộp flag | Tab CONFIG → *Flag regex* / *Flag submit URL*. Token nộp flag **không** nằm trong config (xem `team-tokens.txt`) |
-| Bật / tắt chặn thật (ctf_proxy) | Tab CONFIG → *ctf_proxy mode*: `disabled` (chỉ giám sát) hoặc `docker-compose` + 4 trường *Target ...*, rồi chạy `MODE=contest bash deploy-all.sh` |
+| Bật / tắt chặn thật (ctf_proxy) | Tab CONFIG → *ctf_proxy mode*: `disabled` (chỉ giám sát) hoặc `docker-compose` + 4 trường *ctf_proxy SSH alias / Target compose file/service/network*, rồi chạy `bash contest-runtime/defense/deploy-ctfproxy.sh` (tự nối cho MỌI service `"proto": "tcp"` trong `services[]`; mỗi service có thể tự khai `compose_service` riêng trong JSON bên cạnh, nếu không khai thì dùng field *Target compose service* này làm mặc định chung) |
 | Lỡ sửa config hỏng | Tab CONFIG → **Rollback** (mỗi lần lưu đều có backup trong `contest-runtime/config-backups/`) |
 | Không có ctf_proxy, cần chặn gấp mà attacker **chung IP với checker** | Tab SERVICES → khung "Fallback block — theo NỘI DUNG" → dán đúng chuỗi đặc trưng trong payload (không phải IP) → **Block content**. Chặn theo nội dung TCP payload (iptables `string`-match), không quan tâm IP, nên không sợ mất SLA do trùng IP checker — nhưng vẫn nên **Test on recent traffic** (tab RULES) với cùng chuỗi trước |
 | Muốn đọc log thuần text | EVENTS → **Open as .log**, hoặc `curl -s localhost:8080/api/events.log \| less` |

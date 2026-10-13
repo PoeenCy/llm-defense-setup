@@ -269,22 +269,24 @@ docker exec tulip-timescale-1 psql 'postgres://tulip@timescale:5432/tulip' \
 
 ## Deploying ctf_proxy Against a Real Vulnbox
 
-> This inserts a filtering proxy into the actual traffic path for a live service.
-> **It WILL cause a few seconds of downtime** when the port binding flips over —
-> confirm this is an acceptable risk window before doing it during a scored round.
+> This inserts a filtering proxy into the actual traffic path for EVERY TCP service listed in
+> `services.json` (one deploy, all of them). **It WILL cause a few seconds of downtime** per
+> service when its port binding flips over — confirm this is an acceptable risk window before
+> doing it during a scored round. UDP services are never touched — ctf_proxy itself can't proxy
+> UDP (see its own README); use the Dashboard's content-based firewall block for those instead.
 
-This is now config-driven and automated (`contest-runtime/defense/deploy-ctfproxy.sh`,
+This is config-driven and automated (`contest-runtime/defense/deploy-ctfproxy.sh`,
 called by `deploy-all.sh`), because the only safe way to insert a proxy in
 front of a *live* service is to know exactly which compose file/service/network
 it lives in. Guessing at an unfamiliar layout risks a bad edit to a real
 service's config. The script does nothing by default and only acts once you
 tell it where to look — and even then it re-verifies every assumption over SSH
-immediately before touching anything, skipping cleanly (exit 0, monitor-only
-stays up) if any check fails.
+immediately before touching anything, skipping cleanly (per service, not all-
+or-nothing) if any check fails for that one.
 
-### Point it at the real target
+### Point it at the real target(s)
 
-Edit `services.json` → `ctf_proxy.insertion`:
+Shared connection settings, edit `services.json` → `ctf_proxy.insertion`:
 ```json
 "insertion": {
     "mode": "docker-compose",
@@ -299,27 +301,50 @@ Default `mode` is `"disabled"` — i.e. monitor-only, nothing attempted. You fin
 (it's whatever network the target service's own compose file defines, usually
 named `<project>_<network-key-in-that-compose-file>`).
 
+Per-service: each entry in `services[]` may set its own `compose_service` (the
+compose service name backing THAT port, if it differs from the shared
+`remote_compose_service` above) and must set `layer` (`l7-http`/`l7-https` →
+ctf_proxy parses it as HTTP; `l4-raw` → raw TCP, filters only see bytes; `l4-udp`
+or `proto: "udp"` → skipped entirely, not eligible). A service with no
+`compose_service` falls back to the shared `remote_compose_service` field above
+— that's what keeps a single-service config written before this field existed
+working unchanged.
+
 ### What it actually does (same steps whether you run it by hand or let the script)
 
 ```bash
 bash contest-runtime/defense/deploy-ctfproxy.sh
 ```
-1. Verifies: SSH reachable, compose file exists, the named service is defined
-   in it, that service actually publishes the target port, the named network
-   exists, `docker compose` is available remotely. Any failure → skip, exit 0.
-2. Copies `ctf_proxy` source to the vulnbox-host (`~/ctf-proxy-<team_id>/`).
-3. Writes `proxy/config/config.json` — `target_ip` = the compose SERVICE NAME
-   (not an IP; resolved via Docker DNS once ctf_proxy joins the network),
-   `target_port` = the container-internal port found in step 1, `listen_port`
-   = the public port from `services.json`.
-4. Writes ctf_proxy's own `docker-compose.yml` so `nginx`+`proxy` join the
-   vulnbox's **existing** network instead of creating their own.
-5. Removes the public port line from the ORIGINAL service's compose file
-   (backed up first as `<file>.pre-ctfproxy.bak`) and recreates just that one
-   container to release the port — this is the few-seconds-downtime moment.
-6. Builds + starts ctf_proxy, with a built-in recovery for a known startup
-   race (see below), then curls the target port to confirm real traffic still
+1. Builds the list of eligible services (`proto: "tcp"` in `services[]`); logs a warning and
+   skips any `"proto": "udp"` entries. For each eligible service, verifies: SSH reachable
+   (checked once), compose file exists, its `compose_service` is defined in it, that service
+   actually publishes the target port, the shared network exists, `docker compose` is available
+   remotely. A service that fails its own check is skipped (warning, not fatal) — it doesn't
+   block the others.
+2. Copies `ctf_proxy` source to the vulnbox-host (`~/ctf-proxy-<team_id>/`) — once, shared by
+   every service.
+3. Writes ONE `proxy/config/config.json` with one entry per eligible service: `name` = the
+   service's name (sanitized to a valid Python identifier — it becomes a module name), `target_ip`
+   = its compose SERVICE NAME (not an IP; resolved via Docker DNS once ctf_proxy joins the
+   network), `target_port` = the container-internal port found in step 1, `listen_port` = its
+   public port from `services.json`, `http` = `true` only for `l7-http`/`l7-https`.
+4. Writes ctf_proxy's own `docker-compose.yml` — `nginx`'s `ports:` lists every eligible
+   service's public port, `nginx`+`proxy` join the vulnbox's **existing** network instead of
+   creating their own.
+5. Removes the public port line from each eligible service's ORIGINAL compose file (the whole
+   file backed up once, first service to touch it, as `<file>.pre-ctfproxy.bak`) and recreates
+   each affected compose service (deduped if two ports share one compose service) to release the
+   ports — this is the few-seconds-downtime moment, once per distinct compose service.
+6. Builds + starts ctf_proxy once (shared container, serves all services), with a built-in
+   recovery for a known startup race (see below), then checks each service's public port — curls
+   it if it looks like HTTP, otherwise a raw TCP connect check — to confirm real traffic still
    gets through before declaring success.
+
+Re-running the script is safe: a service that already has ctf_proxy in front of it (its original
+port binding is already gone) fails its own precondition check and is skipped — no double-insert,
+and the live filter content for services that were already running is never touched (`rsync`
+never overwrites `filter_modules/<service>/` once it exists on the remote; verified with
+`rsync --dry-run` before trusting this).
 
 **Known gotcha, already handled by the script — nginx container boots into a
 broken state:** `docker logs <ctfproxy>-nginx` repeating `host not found in
@@ -330,10 +355,11 @@ with no network attached (`docker inspect <name> --format
 fix this — the script detects this exact state and does `docker rm -f` +
 fresh `up -d` automatically. If you're ever doing this by hand instead, same fix.
 
-`filter_modules/web/web_in.py` on the remote starts as an empty template —
-ctf_proxy passes everything through until you write actual detection rules
-there (see the Tulip/Dashboard workflow a few sections up). Don't assume
-"ctf_proxy is running" means "attacks are being blocked."
+`filter_modules/<service>/<service>_in.py` on the remote starts as an empty template, one per
+service — ctf_proxy passes everything through until you write actual detection rules there (via
+the Dashboard's RULES tab 3b, pick the right service from its dropdown if there's more than one —
+see the Tulip/Dashboard workflow a few sections up). Don't assume "ctf_proxy is running" means
+"attacks are being blocked."
 
 ---
 
@@ -392,8 +418,13 @@ Setup_tool/
 │   │   ├── services.json         ← EDIT THIS (single source of truth)
 │   │   ├── validate-config.sh    ← config validator (incl. keyword drift check)
 │   │   └── generators/           ← emit each tool's native config from services.json
-│   │       ├── gen-tulip-env.py  ← → offline-bundle/repos/tulip/.env
-│   │       └── gen-ctfproxy.py   ← → offline-bundle/repos/ctf_proxy/proxy/config/config.json
+│   │       ├── gen-tulip-env.py  ← → offline-bundle/repos/tulip/.env (used)
+│   │       └── gen-ctfproxy.py   ← writes a LOCAL offline-bundle/repos/ctf_proxy/proxy/config/
+│   │                                config.json targeting mock_vulnbox.hostname; still called by
+│   │                                bringup.sh, but nothing in docker-compose.*.yml runs a local
+│   │                                ctf_proxy container that reads it — the real deploy path
+│   │                                (deploy-ctfproxy.sh) generates its OWN config.json directly
+│   │                                on the remote vulnbox-host instead. Orphaned, harmless.
 │   ├── detection/                ← flag-out regex scanner, honeytoken, Suricata ruleset
 │   ├── watchdog/                 ← SLA poller + OS-watchdog deploy scripts
 │   ├── monitor/                  ← vulnbox capture deploy scripts
