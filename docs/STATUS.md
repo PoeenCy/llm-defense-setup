@@ -869,3 +869,48 @@ dashboard features didn't appear after a rebuild -- root cause was the browser c
 ETag/Last-Modified, so the browser still gets a fast 304 when nothing changed -- it just can no
 longer skip the revalidation check and silently serve a stale cached copy). Verified via
 `curl -sI .../static/js/rules.js` showing the header present after a rebuild.
+
+
+---
+
+## 2026-10-13 (later still, yet again) — matching structured table for ctf_proxy (3b)
+
+Follow-up to the Suricata table above: user confirmed ("Có, làm luôn cho đồng bộ" -- yes, do it
+for consistency) wanting the same kind of table for the ctf_proxy filter panel (3b), which still
+had the original "raw textarea" problem -- one Python file as a wall of text, no way to see or
+remove a single rule method without hand-editing.
+
+**Added**, mirroring the Suricata table design 1:1:
+
+- `hostagent/actions/ctfproxy.py`: new `_method_names()` (ast-parses `class Module`, collects
+  method names excluding `execute`/dunders). `apply()` now fetches the OLD filter source before
+  overwriting it, diffs method names old vs new, and records a first-seen timestamp per new
+  method into a Redis hash (`ctfproxy_rule_added`, via `hsetnx`, same pattern as Suricata's
+  `suricata_rule_added`). `delete_method()` cleans up the hash entry on delete.
+- `dashboard/app/routes/rules.py`: new `_parse_ctfproxy_methods()` (ast-parses the source
+  returned by `ctfproxy_get`, pulls each method's docstring as its description, merges in the
+  Redis timestamps). `GET /api/rules/ctfproxy` now also returns `parsed`.
+- `index.html`: new table (# / Method / Description / Added / —) above the raw `#cf-text`
+  textarea, which is now tucked inside a collapsed `<details>` the same way Suricata's is.
+- `rules.js`: full mirror of the Suricata table's live/draft-sync logic --
+  `cfParseLocal()`/`cfRenderRows()`/`cfRenderFromText()` always re-derive the table from the
+  current `#cf-text` content (same reasoning as the Suricata fix above: the method-insert
+  builder, quick-block, and hand-editing all write to that textarea before anything is
+  uploaded). `cfLiveNames`/`cfAddedMap` track what the server last confirmed. Live rows get
+  Edit + Delete; staged/unapplied rows get "Remove draft". Edit (`cfStartEdit`/`cfSaveEdit`)
+  loads the whole method body (a multi-line Python block, found by regex from `def name(self`
+  up to the next `def` or end of class) into a textarea; Save does a block-level find-and-
+  replace in the full source, uploads, and reloads -- same shape as the Suricata line-level
+  edit, just operating on a block instead of a line. Wired a render/reload call into every
+  path that touches `cf-text`: `cpBuild()` (method-insert builder), the Apply/Rollback button
+  handlers, `quickBlockFromEvent()` (EVENTS tab quick-action), and an `input` listener on
+  `#cf-text` for manual typing.
+
+**Verified live, end-to-end** against the real ctf_proxy filter on `dfcd-vbox` (team-03):
+built a throwaway test method via the real `/build` endpoint, applied it, confirmed it showed up
+in `parsed` with a timestamp; did a block-level edit (changed its docstring) and re-applied,
+confirmed the row updated while **keeping the original `added` timestamp**; deleted it, confirmed
+it's gone and the live filter is back to exactly what it was before the test (one pre-existing
+method, `blk_f_l2zsywcvzmxhzw`, left untouched throughout -- it predates this session's work and
+wasn't created by this test, so it was not touched). Confirmed `index.html`/`rules.js` serve the
+new table markup over HTTP.

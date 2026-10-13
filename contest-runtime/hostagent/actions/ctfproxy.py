@@ -6,9 +6,15 @@ import re
 import shlex
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..common import audit, cfg, ssh, stamp
+
+# Redis hash method-name -> ISO timestamp of the first time that method
+# appeared in the live filter. Same idea as Suricata's suricata_rule_added,
+# lets the dashboard show "when was this rule added" per row.
+ADDED_KEY = "ctfproxy_rule_added"
 
 PASSTHROUGH = '''from src.stream import Stream, TCPStream, HTTPStream
 
@@ -56,6 +62,19 @@ def _is_paused(x) -> bool:
     return code == 0
 
 
+def _method_names(source: str) -> set[str]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Module":
+            names |= {f.name for f in node.body
+                      if isinstance(f, ast.FunctionDef) and f.name != "execute" and not f.name.startswith("__")}
+    return names
+
+
 def _compiles(source: str) -> str | None:
     try:
         ast.parse(source)
@@ -99,6 +118,8 @@ def apply(payload, rdb):
         return {"ok": False, "output": "Not uploaded: " + problem}
     paused = _is_paused(x)
     target = x["paused"] if paused else x["file"]
+    old_code, old_out = ssh(x["alias"], f"cat {_q(target)}", timeout=30)
+    old_names = _method_names(old_out) if old_code == 0 else set()
     ts = stamp()
     # Write directly into the existing file rather than write-tmp-then-rename:
     # filter_modules/web/ is root-owned on some vulnbox setups (ctf_proxy's own
@@ -111,6 +132,14 @@ def apply(payload, rdb):
     if code != 0:
         audit(rdb, f"ctf_proxy filter upload failed: {out}", False)
         return {"ok": False, "output": f"Upload failed: {out}"}
+    # Record the first-seen time for any method new in this upload -- hsetnx
+    # so re-uploading unrelated edits never resets an existing method's time.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        for name in _method_names(source) - old_names:
+            rdb.hsetnx(ADDED_KEY, name, now_iso)
+    except Exception:
+        pass  # metadata only -- never block a real apply over this
     if paused:
         audit(rdb, f"ctf_proxy rules saved while PAUSED (backup {ts}) — take effect on Resume", True)
         return {"ok": True, "output": f"Saved (backup {ts}). Filtering is PAUSED, so these rules take effect when you press Resume."}
@@ -140,6 +169,10 @@ def delete_method(payload, rdb):
     result = apply({"source": new_source}, rdb)
     if result.get("ok"):
         audit(rdb, f"ctf_proxy rule {name}() deleted", True)
+        try:
+            rdb.hdel(ADDED_KEY, name)
+        except Exception:
+            pass
     return result
 
 

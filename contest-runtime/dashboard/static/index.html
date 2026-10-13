@@ -347,7 +347,16 @@
         <button class="btn danger" id="cf-rollback">Rollback last upload</button>
         <span class="help" style="padding:0;" id="cf-path"></span>
       </div>
-      <textarea class="code" id="cf-text" spellcheck="false" style="margin:0 8px;width:calc(100% - 16px);min-height:300px;"></textarea>
+      <div class="er-table-wrap" style="margin:0 8px;">
+        <table class="er-table">
+          <thead><tr><th>#</th><th>Method</th><th>Description</th><th>Added</th><th></th></tr></thead>
+          <tbody id="cf-rows"><tr><td colspan="5" class="er-empty">Load from vulnbox to see the live filter rules.</td></tr></tbody>
+        </table>
+      </div>
+      <details style="margin:8px;">
+        <summary style="cursor:pointer;color:var(--text-dim);font-size:11px;">Raw text (advanced edit -- edit here, then Check &amp; Upload)</summary>
+        <textarea class="code" id="cf-text" spellcheck="false" style="margin:8px 0 0;width:100%;min-height:300px;"></textarea>
+      </details>
       <pre class="out" id="cf-out"></pre>
     </div>
   </div>

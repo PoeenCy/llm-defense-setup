@@ -304,6 +304,7 @@ async function cpBuild(btn) {
     const d = await apiPost('/api/rules/ctfproxy/build', { spec, source: $('cf-text').value });
     if (d.errors && d.errors.length) { out.textContent = '✗ Fix these first:\n- ' + d.errors.join('\n- '); return; }
     $('cf-text').value = d.source;
+    cfRenderFromText();
     // That name is now spent (used for the method just inserted) -- clear it
     // so the next pick starts a fresh auto-name instead of reusing this one.
     $('cp-name').value = '';
@@ -432,6 +433,60 @@ async function rsSaveEdit(n) {
   await rsReload();
 }
 
+/* Same always-re-derive-from-the-editor approach as the Suricata table above
+   (see the comment on rsLiveSids/rsParseLocal) -- #cf-text is what Add-method,
+   quick-block and hand-editing all write to, so the table has to reflect
+   whatever is in there right now, not just what the server last confirmed. */
+let cfLiveNames = new Set();   // method names confirmed uploaded as of the last reload/apply
+let cfAddedMap = {};           // name -> ISO timestamp, from the server
+let cfLastParsed = [];
+
+function cfParseLocal(text) {
+  const rows = [];
+  const defRe = /^ {4}def (\w+)\(self[^\n]*\n/gm;
+  const defs = [];
+  let m;
+  while ((m = defRe.exec(text || ''))) defs.push({ name: m[1], start: m.index });
+  let n = 0;
+  for (let i = 0; i < defs.length; i++) {
+    const { name, start } = defs[i];
+    if (name === 'execute' || name.startsWith('_')) continue;
+    const end = i + 1 < defs.length ? defs[i + 1].start : (text || '').length;
+    const code = (text || '').slice(start, end);
+    const trimmed = code.replace(/\s+$/, '');
+    const trailing = code.slice(trimmed.length) || '\n';
+    const docM = trimmed.match(/"""([\s\S]*?)"""/);
+    const desc = docM ? docM[1].split(' [generated')[0].trim() : name;
+    n++;
+    rows.push({ n, name, desc, code, trimmed, trailing,
+                added: cfAddedMap[name] || null, live: cfLiveNames.has(name) });
+  }
+  return rows;
+}
+
+function cfRenderRows(parsed) {
+  cfLastParsed = parsed || [];
+  if (!parsed || !parsed.length) {
+    $('cf-rows').innerHTML = '<tr><td colspan="5" class="er-empty">No rule methods in the filter.</td></tr>';
+    return;
+  }
+  $('cf-rows').innerHTML = parsed.map(r => {
+    const added = r.live ? rsFormatAdded(r.added) : '<span style="color:var(--accent-cyan)">not applied yet</span>';
+    const actions = r.live
+      ? `<button class="er-btn-sm" data-cf-edit="${r.n}">Edit</button> <button class="er-btn-sm danger" data-cf-del="${escHtml(r.name)}">Delete</button>`
+      : `<button class="er-btn-sm" data-cf-remove="${r.n}" title="Removes this draft method from the editor -- it was never uploaded, so there is nothing live to delete">Remove draft</button>`;
+    return `<tr data-cf-n="${r.n}">
+      <td>${r.n}</td>
+      <td>${escHtml(r.name)}()</td>
+      <td class="msg" title="${escHtml(r.name)}()">${escHtml(r.desc)}</td>
+      <td style="white-space:nowrap;">${added}</td>
+      <td style="white-space:nowrap;">${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+function cfRenderFromText() { cfRenderRows(cfParseLocal($('cf-text').value)); }
+
 async function cfLoad() {
   const d = await apiGet('/api/rules/ctfproxy');
   if (!d.ok) { $('cf-out').textContent = '✗ ' + d.output; $('cp-state').className = 'state'; $('cp-state').textContent = ''; return false; }
@@ -440,7 +495,56 @@ async function cfLoad() {
   $('cp-state').className = 'state ' + (d.paused ? 'state-paused' : 'state-running');
   $('cp-state').textContent = d.paused ? 'PAUSED' : 'FILTERING';
   $('cf-out').textContent = d.paused ? '! Filtering is PAUSED (Services tab). Uploads are saved and take effect on Resume.' : '';
+  cfLiveNames = new Set();
+  cfAddedMap = {};
+  (d.parsed || []).forEach(r => { cfLiveNames.add(r.name); if (r.added) cfAddedMap[r.name] = r.added; });
+  cfRenderFromText();
   return true;
+}
+
+async function cfDeleteMethod(name) {
+  if (!confirm(`Delete ctf_proxy rule ${name}()? This re-uploads the filter without it (tested + backed up, same as any other upload).`)) return;
+  const d = await apiPost('/api/rules/ctfproxy/delete', { name });
+  $('cf-out').textContent = d.ok ? `✓ Deleted ${name}().` : '✗ ' + d.output;
+  showToast(`Delete ${name}(): ${d.ok ? 'done' : 'FAILED'}`, d.ok ? 'success' : 'critical');
+  await cfLoad();
+}
+
+function cfRemoveDraft(n) {
+  const row = cfLastParsed.find(r => r.n === n);
+  if (!row) return;
+  const full = $('cf-text').value;
+  if (!full.includes(row.code)) { cfRenderFromText(); return; }
+  $('cf-text').value = full.replace(row.code, '');
+  cfRenderFromText();
+}
+
+function cfStartEdit(n) {
+  const row = cfLastParsed.find(r => r.n === n);
+  const tr = $('cf-rows').querySelector(`tr[data-cf-n="${n}"]`);
+  if (!row || !tr) return;
+  const cells = tr.querySelectorAll('td');
+  cells[2].innerHTML = `<textarea class="code" id="cf-edit-${n}" style="width:100%;min-height:140px;" spellcheck="false">${escHtml(row.trimmed)}</textarea>`;
+  cells[4].innerHTML = `<button class="er-btn-sm primary" data-cf-save="${n}">Save</button> <button class="er-btn-sm" data-cf-cancel="${n}">Cancel</button>`;
+}
+
+async function cfSaveEdit(n) {
+  const row = cfLastParsed.find(r => r.n === n);
+  const ta = $(`cf-edit-${n}`);
+  if (!row || !ta) return;
+  const newBody = ta.value.replace(/\s+$/, '');
+  if (!newBody.trim()) { alert('Method body cannot be empty -- use Delete instead.'); return; }
+  const full = $('cf-text').value;
+  if (!full.includes(row.code)) {
+    $('cf-out').textContent = '✗ Could not find the original method to replace (the filter changed under you) -- Load from vulnbox and try again.';
+    cfRenderFromText();
+    return;
+  }
+  $('cf-text').value = full.replace(row.code, newBody + row.trailing);
+  const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value });
+  $('cf-out').textContent = d.ok ? `✓ ${row.name}() updated and uploaded.` : '✗ ' + d.output;
+  showToast(`Edit ${row.name}(): ${d.ok ? 'done' : 'FAILED'}`, d.ok ? 'success' : 'critical');
+  await cfLoad();
 }
 
 async function rulesPrefillFromEvent(e) {
@@ -539,6 +643,7 @@ async function quickBlockFromEvent(e) {
       cpRes = { ok: false, msg: 'ctf_proxy: ' + errOut };
     } else {
       const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value });
+      if (d.ok) await cfLoad(); else cfRenderFromText();
       cpRes = { ok: d.ok, msg: d.ok ? `✓ ctf_proxy now blocking on "${best.value.slice(0, 60)}".` : '✗ ctf_proxy: ' + d.output };
     }
   }
@@ -694,6 +799,7 @@ function initRules() {
       const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value });
       showResult(out, d);
       showToast(d.ok ? 'ctf_proxy filter uploaded' : 'Upload rejected — see output', d.ok ? 'success' : 'critical');
+      if (d.ok) await cfLoad(); else cfRenderFromText();
     });
   };
   $('cf-rollback').onclick = e => {
@@ -701,7 +807,16 @@ function initRules() {
     withBusy(e.target, 'cf-out', 'Rolling back...', async out => {
       const d = await apiPost('/api/rules/ctfproxy/rollback');
       showResult(out, d);
-      if (d.source) $('cf-text').value = d.source;
+      await cfLoad();   // re-fetch from disk rather than trust d.source, so timestamps/live-set stay accurate
     });
   };
+  $('cf-rows').addEventListener('click', ev => {
+    let b = ev.target.closest('[data-cf-del]'); if (b) { cfDeleteMethod(b.dataset.cfDel); return; }
+    b = ev.target.closest('[data-cf-edit]'); if (b) { cfStartEdit(+b.dataset.cfEdit); return; }
+    b = ev.target.closest('[data-cf-save]'); if (b) { cfSaveEdit(+b.dataset.cfSave); return; }
+    b = ev.target.closest('[data-cf-cancel]'); if (b) { cfRenderFromText(); return; }
+    b = ev.target.closest('[data-cf-remove]'); if (b) { cfRemoveDraft(+b.dataset.cfRemove); return; }
+  });
+  // Keep the table in sync with hand-edits in the raw textarea too.
+  $('cf-text').addEventListener('input', cfRenderFromText);
 }

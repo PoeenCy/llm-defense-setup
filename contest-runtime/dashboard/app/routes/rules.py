@@ -2,6 +2,7 @@
 host_agent (ctf_proxy filters live on the vulnbox-host). Every WRITE goes
 through host_agent, which validates before touching anything live and keeps a
 backup for rollback."""
+import ast
 import re
 
 from fastapi import APIRouter
@@ -16,8 +17,9 @@ router = APIRouter(prefix="/api/rules")
 
 _SID_RE = re.compile(r'sid\s*:\s*(\d+)')
 _MSG_RE = re.compile(r'msg\s*:\s*"((?:[^"\\]|\\.)*)"')
-# Same Redis key hostagent/actions/suricata.py writes to on apply/delete.
+# Same Redis keys hostagent/actions/{suricata,ctfproxy}.py write to on apply/delete.
 _ADDED_KEY = "suricata_rule_added"
+_CF_ADDED_KEY = "ctfproxy_rule_added"
 
 
 def _live_suricata_rules() -> str:
@@ -94,10 +96,37 @@ async def test_suricata_on_traffic(body: dict):
     return await run_op("suricata_test_traffic", {"rules": body.get("rules", ""), "files": files}, wait_s=300)
 
 
+def _parse_ctfproxy_methods(source: str, added: dict) -> list[dict]:
+    """One row per rule method on class Module (excluding execute/dunders) --
+    the structured view the UI table shows, mirroring Suricata's _parse_rules."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    rows, n = [], 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ClassDef) and node.name == "Module"):
+            continue
+        for f in node.body:
+            if not isinstance(f, ast.FunctionDef) or f.name == "execute" or f.name.startswith("__"):
+                continue
+            n += 1
+            doc = (ast.get_docstring(f) or "").split(" [generated")[0].strip()
+            rows.append({"n": n, "name": f.name, "desc": doc or f.name, "added": added.get(f.name)})
+    return rows
+
+
 # ── ctf_proxy filters (remote) ────────────────────────────────────────────────
 @router.get("/ctfproxy")
 async def get_ctfproxy():
-    return await run_op("ctfproxy_get")
+    result = await run_op("ctfproxy_get")
+    if result.get("ok") and isinstance(result.get("source"), str):
+        try:
+            added = await get_redis().hgetall(_CF_ADDED_KEY)
+        except Exception:
+            added = {}
+        result["parsed"] = _parse_ctfproxy_methods(result["source"], added)
+    return result
 
 
 @router.post("/ctfproxy")
