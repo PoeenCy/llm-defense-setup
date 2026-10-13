@@ -72,3 +72,19 @@ async def firewall_op(op: str, body: dict):
     if op not in ("block", "unblock"):
         return {"ok": False, "output": "op must be block or unblock"}
     return await run_op(f"firewall_{op}", {"ip": body.get("ip", "")}, wait_s=40)
+
+
+# ── Content-based fallback block — drops TCP packets by payload literal
+#    (iptables string match), works even if attacker shares an IP with the
+#    checker bot. See hostagent/actions/firewall.py for the why. ──
+@router.get("/api/firewall/content")
+async def firewall_content_list():
+    return await run_op("firewall_content_list", wait_s=40)
+
+
+@router.post("/api/firewall/content/{op}")
+async def firewall_content_op(op: str, body: dict):
+    if op not in ("block", "unblock"):
+        return {"ok": False, "output": "op must be block or unblock"}
+    return await run_op(f"firewall_content_{op}",
+                        {"pattern": body.get("pattern", ""), "port": body.get("port")}, wait_s=40)

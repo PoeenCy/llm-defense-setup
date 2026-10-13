@@ -20,4 +20,7 @@ ACTIONS = {
     "firewall_list": firewall.list_blocks,
     "firewall_block": firewall.block_ip,
     "firewall_unblock": firewall.unblock_ip,
+    "firewall_content_list": firewall.list_content_blocks,
+    "firewall_content_block": firewall.block_content,
+    "firewall_content_unblock": firewall.unblock_content,
 }

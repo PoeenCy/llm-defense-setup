@@ -379,6 +379,25 @@
     <div class="er-table-wrap"><table class="er-table"><thead><tr><th>IP đang bị chặn (CTFBLOCK)</th><th></th></tr></thead>
       <tbody id="fw-body"><tr><td colspan="2" class="er-empty">Chưa tải — bấm Refresh list.</td></tr></tbody></table></div>
   </div>
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title"><span>⛔</span> Fallback block — theo NỘI DUNG (không theo IP)</div>
+      <button class="btn" id="fwc-refresh">Refresh list</button></div>
+    <div class="help">Dùng khi attacker <b>dùng chung IP với checker</b> (BTC NAT chung) — chặn theo IP ở trên sẽ mất SLA.
+      Cách này chặn gói tin TCP có <b>đúng chuỗi ký tự</b> trong nội dung (giống nguyên tắc ctf_proxy: khớp nội dung,
+      không khớp IP/UA). <b>Copy đúng chuỗi đặc trưng từ payload tấn công thật</b> — đừng đoán chung chung, và nên
+      <b>Test on recent traffic</b> (tab RULES, Suricata) với cùng chuỗi đó trước để chắc không khớp traffic hợp lệ.
+      Nên điền đúng port service để thu hẹp phạm vi. Cần passwordless sudo trên vulnbox. Mọi rule nằm trong chain
+      <code>CTFBLOCK_CONTENT</code>.</div>
+    <div class="row-actions">
+      <input class="inp" id="fwc-pattern" placeholder="Chuỗi đặc trưng trong payload, vd: ' OR '1'='1" style="min-width:260px;flex:1;">
+      <input class="inp" id="fwc-port" placeholder="Port (tùy chọn)" style="max-width:120px;">
+      <button class="btn danger" id="fwc-block">Block content</button>
+      <button class="btn" id="fwc-unblock">Unblock content</button>
+    </div>
+    <pre class="out" id="fwc-out"></pre>
+    <div class="er-table-wrap"><table class="er-table"><thead><tr><th>Chuỗi đang bị chặn (CTFBLOCK_CONTENT)</th><th>Port</th><th></th></tr></thead>
+      <tbody id="fwc-body"><tr><td colspan="3" class="er-empty">Chưa tải — bấm Refresh list.</td></tr></tbody></table></div>
+  </div>
 </section>
 
 <!-- ══ TAB: CONFIG ══════════════════════════════════════════════ -->

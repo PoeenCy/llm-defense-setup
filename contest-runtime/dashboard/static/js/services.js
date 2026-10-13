@@ -58,12 +58,38 @@ function fwDo(op, ip) {
   });
 }
 
+async function fwcLoad() {
+  const d = await apiGet('/api/firewall/content');
+  if (!d.ok) { $('fwc-body').innerHTML = `<tr><td colspan="3" class="er-empty">✗ ${escHtml(d.output || 'failed')}</td></tr>`; return; }
+  $('fwc-body').innerHTML = (d.rules && d.rules.length)
+    ? d.rules.map(r => `<tr><td>${escHtml(r.pattern)}</td><td>${escHtml(r.port || '(mọi port)')}</td>` +
+        `<td><button class="er-btn-sm" data-fwc-un="${escHtml(r.pattern)}" data-fwc-port="${escHtml(r.port || '')}">Unblock</button></td></tr>`).join('')
+    : '<tr><td colspan="3" class="er-empty">Không có chuỗi nào bị chặn.</td></tr>';
+}
+
+function fwcDo(op, pattern, port) {
+  if (!pattern) { $('fwc-out').textContent = 'Nhập chuỗi trước.'; return; }
+  if (op === 'block' && !confirm(`Chặn mọi gói tin TCP chứa "${pattern}"${port ? ' trên port ' + port : ' (MỌI port)'}?\n\nChỉ dùng khi đã chắc chuỗi này không khớp traffic hợp lệ/checker — nên Test on recent traffic (tab RULES) trước.`)) return;
+  withBusy($(op === 'block' ? 'fwc-block' : 'fwc-unblock'), 'fwc-out', `${op} "${pattern}"...`, async out => {
+    const d = await apiPost('/api/firewall/content/' + op, { pattern, port: port || null });
+    showResult(out, d);
+    showToast(`${op} content: ${d.ok ? 'done' : 'FAILED'}`, d.ok ? 'success' : 'critical');
+    await fwcLoad();
+  });
+}
+
 function initServices() {
   $('fw-refresh').onclick = fwLoad;
   $('fw-block').onclick = () => fwDo('block', $('fw-ip').value.trim());
   $('fw-unblock').onclick = () => fwDo('unblock', $('fw-ip').value.trim());
   $('fw-body').addEventListener('click', ev => {
     const b = ev.target.closest('[data-fw-un]'); if (b) fwDo('unblock', b.dataset.fwUn);
+  });
+  $('fwc-refresh').onclick = fwcLoad;
+  $('fwc-block').onclick = () => fwcDo('block', $('fwc-pattern').value.trim(), $('fwc-port').value.trim());
+  $('fwc-unblock').onclick = () => fwcDo('unblock', $('fwc-pattern').value.trim(), $('fwc-port').value.trim());
+  $('fwc-body').addEventListener('click', ev => {
+    const b = ev.target.closest('[data-fwc-un]'); if (b) fwcDo('unblock', b.dataset.fwcUn, b.dataset.fwcPort);
   });
   $('sv-refresh').onclick = loadServices;
   $('sv-body').addEventListener('click', ev => {

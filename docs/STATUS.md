@@ -736,3 +736,37 @@ the pcap file(s) and Tulip's old SQL data now, to keep things light. Done:
 
 Final state: disk 79% full, 36GB free (was 93%/12GB free at the start of this disk-cleanup
 thread).
+
+
+---
+
+## 2026-10-13 (later still) — content-based fallback firewall block
+
+User flagged a real gap in the existing fallback firewall (`contest-runtime/hostagent/
+actions/firewall.py`, used when ctf_proxy isn't in the traffic path): it only blocks by source
+IP. If the organizer NATs the checker bot through the same IP as an attacker (a documented risk
+elsewhere in this repo -- see `ml-fingerprint`'s own notes), blocking that IP blocks the checker
+too = SLA loss.
+
+**Added**: a second blocking primitive, `block_content`/`unblock_content`/`list_content_blocks`,
+using iptables' `string` match to drop TCP packets by payload literal (hex-encoded before ever
+touching a remote shell -- never raw-interpolated), independent of source IP -- mirrors
+ctf_proxy's own rule philosophy (match request content, never IP/User-Agent) applied at the
+iptables layer. Wired through all three layers: `hostagent/actions/firewall.py` (new chain
+`CTFBLOCK_CONTENT`) → `hostagent/actions/__init__.py` (registered 3 new whitelisted actions) →
+`dashboard/app/routes/services.py` (`/api/firewall/content[/block|unblock]`) →
+`dashboard/static/index.html` + `services.js` (new panel on the SERVICES tab, confirms before
+blocking, same UX pattern as the existing IP-block panel).
+
+**Verified live, end-to-end, against the real vulnbox**: rebuilt the dashboard image, restarted
+`host_agent.py` (20 whitelisted actions now, was 17), called `POST /api/firewall/content/block`
+with a test pattern + port 8003 → confirmed via direct SSH to `dfcd-vbox` that the exact
+iptables rule landed (`-A CTFBLOCK_CONTENT -p tcp --dport 8003 -m string --string "<hex>" ...
+-j DROP`). Found and fixed a real bug in `list_content_blocks` during this test: iptables' own
+`-S` listing re-renders a `--hex-string` rule under the `--string` flag name (same hex value,
+different flag label) -- the parser only looked for `--hex-string` and silently returned an
+empty pattern. Fixed to accept either flag name. Re-verified: list now decodes the pattern
+correctly, unblock removes the rule, confirmed empty chain via SSH afterward. No rule left
+behind on the vulnbox.
+
+Documented in `CONFIG.md`'s situational table.

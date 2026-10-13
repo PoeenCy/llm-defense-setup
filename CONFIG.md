@@ -41,6 +41,7 @@ Dashboard hỏng hẳn? Xem mục cuối ("Không mở được Dashboard").
 | Đổi flag regex / URL nộp flag | Tab CONFIG → *Flag regex* / *Flag submit URL*. Token nộp flag **không** nằm trong config (xem `team-tokens.txt`) |
 | Bật / tắt chặn thật (ctf_proxy) | Tab CONFIG → *ctf_proxy mode*: `disabled` (chỉ giám sát) hoặc `docker-compose` + 4 trường *Target ...*, rồi chạy `MODE=contest bash deploy-all.sh` |
 | Lỡ sửa config hỏng | Tab CONFIG → **Rollback** (mỗi lần lưu đều có backup trong `contest-runtime/config-backups/`) |
+| Không có ctf_proxy, cần chặn gấp mà attacker **chung IP với checker** | Tab SERVICES → khung "Fallback block — theo NỘI DUNG" → dán đúng chuỗi đặc trưng trong payload (không phải IP) → **Block content**. Chặn theo nội dung TCP payload (iptables `string`-match), không quan tâm IP, nên không sợ mất SLA do trùng IP checker — nhưng vẫn nên **Test on recent traffic** (tab RULES) với cùng chuỗi trước |
 | Muốn đọc log thuần text | EVENTS → **Open as .log**, hoặc `curl -s localhost:8080/api/events.log \| less` |
 | Đồng đội muốn xem Dashboard từ máy khác | Tab CONFIG → *Dashboard bind IP* = IP LAN của máy này. **Chỉ làm trong mạng tin cậy** — các cổng này không có mật khẩu |
 
