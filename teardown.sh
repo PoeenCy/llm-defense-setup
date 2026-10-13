@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # teardown.sh — Graceful shutdown of the entire CTF monitor hub
+#
+# Always tears down BOTH docker-compose.contest.yml and docker-compose.prep.yml
+# regardless of which MODE brought the stack up — `docker compose down` on a
+# file whose services were never started is a safe no-op, and this guarantees
+# teardown never leaves a stray prep-only (AI) container running.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,22 +16,23 @@ ok()  { echo -e "${GREEN}[OK]${NC}       $*"; }
 
 log "Stopping CTF Monitor Hub..."
 
-# Stop hub services
+# Stop hub services (both zones — see header comment)
 cd "$SCRIPT_DIR"
-docker compose down 2>&1 | tail -3 || true
-ok "Hub services stopped"
+docker compose -f docker-compose.contest.yml -f docker-compose.prep.yml down 2>&1 | tail -3 || true
+ok "Hub services stopped (contest + prep)"
 
-# Stop Tulip
+# Stop Tulip — must pass the same -f overlay bringup.sh used to start it, or
+# docker-compose-suricata.yml's suricata service (and anything else only
+# defined in the overlay) is left orphaned and running (verified: an earlier
+# version of this script left tulip-suricata-1 running after teardown).
 if [[ -d "$TULIP_DIR" ]]; then
     cd "$TULIP_DIR"
-    docker compose down 2>&1 | tail -3 || true
+    TULIP_COMPOSE="-f docker-compose.yml"
+    [[ -f docker-compose-suricata.yml ]] && TULIP_COMPOSE="-f docker-compose.yml -f docker-compose-suricata.yml"
+    docker compose $TULIP_COMPOSE down 2>&1 | tail -3 || true
     cd "$SCRIPT_DIR"
     ok "Tulip stopped"
 fi
-
-# Stop Ollama (optional — comment out if you want to keep it)
-# pkill -f "ollama serve" 2>/dev/null || true
-# ok "Ollama stopped"
 
 echo ""
 echo -e "${GREEN}CTF Monitor Hub stopped. All traffic/alert data preserved.${NC}"

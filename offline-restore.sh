@@ -24,16 +24,13 @@ echo "======================================================"
 echo ""
 
 # ============================================================
-# 0. Copy services.json to project root if not present
+# 0. Copy services.json to contest-runtime/config/ if not present
 # ============================================================
-if [[ ! -f "$SCRIPT_DIR/services.json" ]]; then
-    cp "$CONFIG" "$SCRIPT_DIR/services.json"
-    ok "Restored services.json to project root"
+mkdir -p "$SCRIPT_DIR/contest-runtime/config"
+if [[ ! -f "$SCRIPT_DIR/contest-runtime/config/services.json" ]]; then
+    cp "$CONFIG" "$SCRIPT_DIR/contest-runtime/config/services.json"
+    ok "Restored services.json to contest-runtime/config/"
 fi
-
-# Parse config
-LLM_MODEL=$(python3 -c "import json; d=json.load(open('$SCRIPT_DIR/services.json')); print(d['ollama']['llm_model'])")
-EMBED_MODEL=$(python3 -c "import json; d=json.load(open('$SCRIPT_DIR/services.json')); print(d['ollama']['embed_model'])")
 
 # ============================================================
 # 1. Load Docker Images
@@ -85,60 +82,16 @@ log "Installing Python wheels from offline-bundle/wheels/..."
     --no-index \
     --find-links "$BUNDLE/wheels" \
     --quiet \
-    fastapi uvicorn pymongo redis scapy requests python-dotenv \
+    fastapi uvicorn redis scapy requests python-dotenv \
     numpy scikit-learn httpx pydantic aiofiles websockets \
     dpkt colorama rich typer schedule pyzmq watchdog psutil \
-    paramiko jinja2 aiohttp ollama 2>/dev/null || \
+    paramiko jinja2 aiohttp 2>/dev/null || \
 warn "Some wheels failed to install — check $BUNDLE/wheels/ for missing packages"
 
 ok "Python environment ready at $VENV"
 
 # ============================================================
-# 3. Restore Ollama Models
-# ============================================================
-log "Restoring Ollama models..."
-# Same path-detection as pull-and-save.sh: a systemd-managed install runs as
-# user "ollama" and stores models under /usr/share/ollama/.ollama (mode 700,
-# unreadable/unwritable by other users without sudo).
-if [[ -n "${OLLAMA_MODELS:-}" ]]; then
-    OLLAMA_HOME="$OLLAMA_MODELS"
-elif [[ -w "$HOME/.ollama" || ! -e "$HOME/.ollama" ]]; then
-    OLLAMA_HOME="$HOME/.ollama"
-elif [[ -d "/usr/share/ollama/.ollama" ]]; then
-    OLLAMA_HOME="/usr/share/ollama/.ollama"
-else
-    OLLAMA_HOME="$HOME/.ollama"
-fi
-
-if [[ -d "$BUNDLE/ollama-models/blobs" ]]; then
-    if [[ -w "$(dirname "$OLLAMA_HOME")" ]] || mkdir -p "$OLLAMA_HOME" 2>/dev/null; then
-        rsync -a --ignore-existing "$BUNDLE/ollama-models/" "$OLLAMA_HOME/" 2>/dev/null || \
-        cp -rn "$BUNDLE/ollama-models/." "$OLLAMA_HOME/"
-        ok "Ollama models restored to $OLLAMA_HOME"
-    else
-        warn "Cannot write to $OLLAMA_HOME as $(whoami) — run:"
-        warn "  sudo rsync -a $BUNDLE/ollama-models/ $OLLAMA_HOME/ && sudo chown -R ollama:ollama $OLLAMA_HOME"
-    fi
-else
-    warn "No Ollama model blobs found in bundle — models must be pulled manually"
-fi
-
-# Verify models available
-if command -v ollama &>/dev/null; then
-    # Briefly start ollama to verify
-    if ! pgrep -x ollama > /dev/null; then
-        ollama serve &>/dev/null &
-        OLLAMA_PID=$!
-        sleep 3
-        ollama list 2>/dev/null || warn "Could not list Ollama models"
-        kill $OLLAMA_PID 2>/dev/null || true
-    else
-        ollama list 2>/dev/null || warn "Could not list Ollama models"
-    fi
-fi
-
-# ============================================================
-# 4. Verify repos
+# 3. Verify repos
 # ============================================================
 log "Verifying cloned repos..."
 for repo in tulip pcap-broker; do
@@ -150,7 +103,7 @@ for repo in tulip pcap-broker; do
 done
 
 # ============================================================
-# 5. Final summary
+# 4. Final summary
 # ============================================================
 echo ""
 echo -e "${GREEN}======================================================"

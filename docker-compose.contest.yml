@@ -1,0 +1,137 @@
+version: "3.8"
+
+# CTF Monitor Hub — CONTEST-MODE compose file.
+#
+# This file is the ONLY thing `MODE=contest bringup.sh` ever runs from this
+# repo. It must never gain an AI/model-inference service — that's what
+# docker-compose.prep.yml is for, and bringup.sh refuses to merge it in when
+# MODE=contest (see the mode gate + assert_contest_clean in bringup.sh).
+#
+# Services here: redis (shared alert/hint queue), detection (flag-out +
+# honeytoken + Suricata ingest), watchdog (SLA prober), dashboard (UI/API).
+# All are deterministic, non-AI — see docs/INVENTORY.md for the audit trail.
+
+services:
+
+  # ============================================================
+  # Redis — shared alert queue (Items 4, 5, 7, 8)
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ctf-redis
+    restart: unless-stopped
+    ports:
+      - "${BIND_IP:-127.0.0.1}:${ALERT_QUEUE_PORT:-6380}:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - ctf-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ============================================================
+  # Detection service — flag-out regex + honeytoken collector (Item 4)
+  # ============================================================
+  detection:
+    build:
+      context: ./contest-runtime/detection/service
+      dockerfile: Dockerfile
+    container_name: ctf-detection
+    restart: unless-stopped
+    ports:
+      # public: honeytoken traps + OS-watchdog reports from the vulnbox only
+      - "${HONEYTOKEN_PORT:-9999}:9997"
+      # admin/test endpoints (alerts listing, clear, inject-flag): loopback only
+      - "${BIND_IP:-127.0.0.1}:9998:9999"
+    environment:
+      - FLAG_REGEX=${FLAG_REGEX}
+      - HONEYTOKEN_FLAG=${HONEYTOKEN_FLAG}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MONITOR_IP=${MONITOR_IP}
+      - TEAMS_CIDR=${TEAMS_CIDR}
+      - TRAFFIC_DIR=/traffic
+      - SURICATA_DIR=/suricata
+    volumes:
+      - ./traffic:/traffic:ro
+      - ./contest-runtime/detection/suricata/log:/suricata:ro
+      - ./contest-runtime/config/services.json:/app/services.json:ro
+    networks:
+      - ctf-net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ============================================================
+  # Watchdog — SLA poller for vulnbox services (Item 7)
+  # ============================================================
+  watchdog:
+    build:
+      context: ./contest-runtime/watchdog
+      dockerfile: Dockerfile
+    container_name: ctf-watchdog
+    restart: unless-stopped
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - VULNBOX_IP=${VULNBOX_IP}
+      - MONITOR_IP=${MONITOR_IP}
+    volumes:
+      - ./contest-runtime/config/services.json:/app/services.json:ro
+    networks:
+      - ctf-net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ============================================================
+  # Dashboard — unified monitoring UI (Item 8). No LLM path exists anywhere
+  # in this repo (removed per an explicit decision — see docs/STATUS.md).
+  # ============================================================
+  dashboard:
+    build:
+      context: ./contest-runtime/dashboard
+      dockerfile: Dockerfile
+    container_name: ctf-dashboard
+    restart: unless-stopped
+    ports:
+      - "${BIND_IP:-127.0.0.1}:${DASHBOARD_PORT:-8080}:8080"
+    environment:
+      - MODE=${MODE:-contest}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TULIP_API_URL=http://api:5000
+      - CONFIG=/srv/services.json
+      - RULES_PATH=/srv/rules/suricata.rules
+      - MONITOR_IP=${MONITOR_IP}
+      - VULNBOX_IP=${VULNBOX_IP}
+    volumes:
+      - ./contest-runtime/config/services.json:/srv/services.json:ro
+      - ./contest-runtime/detection/suricata/lib/rules:/srv/rules:ro
+      # only the Suricata rule-template subfolder is ever read via LIBRARY_DIR
+      # (dashboard/app/routes/rules.py reads LIBRARY_DIR/"suricata" only) — the
+      # ctf_proxy/nginx templates under contest-runtime/defense/rules-library
+      # are a manual copy-paste workflow (see that dir's README), not API-served.
+      - ./contest-runtime/detection/rules-library:/srv/rules-library/suricata:ro
+    networks:
+      - ctf-net
+      - tulip-internal   # reads flows from Tulip's API for the Rules tab
+    depends_on:
+      redis:
+        condition: service_healthy
+
+networks:
+  # Tulip's own compose network (project "tulip"). Joined only by the dashboard
+  # so it reaches Tulip's API directly instead of via a host-published port.
+  tulip-internal:
+    external: true
+    name: tulip_internal
+  ctf-net:
+    name: ctf-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24
+          ip_range: 10.0.0.16/28

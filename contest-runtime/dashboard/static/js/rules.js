@@ -1,0 +1,567 @@
+/* rules.js — RULES tab: flow → selection → rule builders → test on traffic → apply. */
+
+const HTTP_REQ_BUFFERS = ['http.uri', 'http.request_body', 'http.header', 'http.cookie', 'http.user_agent',
+                          'http.method', 'http.host', 'http.uri.raw', 'http.request_line'];
+const HTTP_RESP_BUFFERS = ['http.response_body', 'http.stat_code', 'http.response_line'];
+let flowMessages = [];
+let currentBuilder = 'sur';
+let cpNameTouched = false;   // true once the user types into cp-name by hand
+
+/* ── Step 1: the attack ─────────────────────────────────────── */
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+/* opts.highlight: text to mark (e.g. the stolen flag) so you see where it left. */
+async function loadFlow(id, opts = {}) {
+  id = (id || $('fl-id').value).trim();
+  const m = id.match(UUID_RE);              // accepts a pasted Tulip URL too
+  if (!m) { $('fl-view').textContent = '✗ Paste a Tulip flow id or a Tulip flow URL (…/flow/<id>).'; return false; }
+  id = m[0];
+  $('fl-id').value = id;
+  $('fl-view').textContent = '⏳ loading flow from Tulip...';
+  $('fl-picks').innerHTML = '';
+  const d = await apiGet('/api/tulip/flow/' + encodeURIComponent(id));
+  if (d.error) { $('fl-view').textContent = '✗ ' + d.error; flowMessages = []; return false; }
+  flowMessages = d.messages || [];
+  $('fl-meta').textContent = `${d.src} → ${d.dst}  ·  ${(d.time || '').slice(0, 19)}  ·  tags: ${(d.tags || []).join(', ')}`;
+  const hl = opts.highlight;
+  $('fl-view').innerHTML = flowMessages.map((m, i) => {
+    let html = escHtml(m.text);
+    if (hl) html = html.split(escHtml(hl)).join(`<mark>${escHtml(hl)}</mark>`);
+    return `<span class="dir ${m.direction}"></span><span data-msg="${i}">${html}</span>`;
+  }).join('\n');
+  const mark = $('fl-view').querySelector('mark');
+  if (mark) mark.scrollIntoView({ block: 'center' });
+  renderPicks();
+  const dst = (d.dst || '').split(':').pop();
+  if (dst && [...$('su-port').options].some(o => o.value === dst)) $('su-port').value = dst;
+  return true;
+}
+
+/* Split a client message into the parts a rule can target. Each pick knows
+   its location, so the builder gets the narrowest buffer/target directly. */
+function requestPicks() {
+  const picks = [];
+  const add = (kind, value, loc) => {
+    if (!value || value.length < 2 || picks.some(p => p.value === value && p.loc.where === loc.where)) return;
+    picks.push({ kind, value: value.slice(0, 300), loc: { direction: 'client', ...loc } });
+  };
+  flowMessages.filter(m => m.direction === 'client').forEach(m => {
+    // several requests can share one keep-alive connection
+    m.text.split(/(?=^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) \S+ HTTP\/)/m).forEach(req => {
+      const lm = req.match(/^([A-Z]+) (\S+) HTTP\/[\d.]+/);
+      if (!lm) { add('raw', req.trim().slice(0, 120), { where: 'raw' }); return; }
+      const [path, query] = lm[2].split(/\?(.*)/s);
+      add('path', path, { where: 'uri' });
+      (query || '').split('&').forEach(kv => {
+        const [k, v] = kv.split(/=(.*)/s);
+        if (v) add(`?${k}=`, v, { where: 'uri', param: k });
+      });
+      const sep = req.search(/\r?\n\r?\n/);
+      const head = sep >= 0 ? req.slice(0, sep) : req;
+      const body = sep >= 0 ? req.slice(sep).replace(/^\s+/, '') : '';
+      head.split(/\r?\n/).slice(1).forEach(line => {
+        const hm = line.match(/^([A-Za-z0-9-]+):\s*(.*)$/);
+        if (!hm) return;
+        const name = hm[1].toLowerCase();
+        if (name === 'cookie') hm[2].split(/;\s*/).forEach(c => add('cookie', c, { where: 'header', header: 'Cookie' }));
+        else if (name === 'user-agent' || name.startsWith('x-') || name === 'authorization' || name === 'referer')
+          add(hm[1], hm[2], { where: 'header', header: hm[1] });
+      });
+      if (!body) return;
+      let parsed = false;
+      if (/^[\[{]/.test(body)) {
+        try {
+          const j = JSON.parse(body);
+          Object.entries(Array.isArray(j) ? {} : j).forEach(([k, v]) => {
+            if (typeof v === 'string' || typeof v === 'number') add(`body ${k}`, String(v), { where: 'body', param: k });
+          });
+          parsed = true;
+        } catch (e) { /* not JSON */ }
+      }
+      const bm = head.match(/boundary=("?)([^";\r\n]+)\1/i);
+      if (bm) {                                   // file upload: one pick per part
+        body.split('--' + bm[2]).forEach(part => {
+          const nm = (part.match(/name="([^"]*)"/) || [])[1];
+          if (!nm) return;
+          const fn = (part.match(/filename="([^"]*)"/) || [])[1];
+          if (fn) add(`file ${nm}`, fn, { where: 'body' });   // multipart: match on raw body, params aren't parsed
+          const content = part.split(/\r?\n\r?\n/).slice(1).join('\n\n').trim();
+          if (content) add(`part ${nm}`, content.slice(0, 120), { where: 'body' });
+        });
+        parsed = true;
+      }
+      if (!parsed && /^[^=&\s]+=[^\n]*$/.test(body.split('\n')[0])) {
+        body.split('\n')[0].split('&').forEach(kv => {
+          const [k, v] = kv.split(/=(.*)/s);
+          if (v) add(`body ${k}=`, v, { where: 'body', param: k });
+        });
+        parsed = true;
+      }
+      if (!parsed) add('body', body.slice(0, 120), { where: 'body' });
+    });
+  });
+  return picks.slice(0, 40);
+}
+
+let flowPicks = [];
+function renderPicks() {
+  flowPicks = requestPicks();
+  $('fl-picks').innerHTML = flowPicks.length
+    ? flowPicks.map((p, i) => `<button class="pick" data-pick="${i}" title="${escHtml(p.value)}"><i>${escHtml(p.kind)}</i>${escHtml(p.value.slice(0, 60))}</button>`).join('')
+    : '<span class="help" style="padding:0;">(no HTTP request found — select text manually)</span>';
+}
+
+/* Guess WHERE in the request the selected text lives, so the builder can
+   target the narrowest buffer (narrow rule = less chance of hitting the checker). */
+function locateSelection(sel) {
+  const node = window.getSelection().anchorNode;
+  const span = node && (node.nodeType === 3 ? node.parentElement : node).closest('[data-msg]');
+  const msg = span ? flowMessages[+span.dataset.msg] : flowMessages.find(m => m.text.includes(sel));
+  if (!msg) return { where: 'raw' };
+  const text = msg.text;
+  const idx = text.indexOf(sel);
+  const headEnd = text.indexOf('\r\n\r\n') >= 0 ? text.indexOf('\r\n\r\n') : text.indexOf('\n\n');
+  const firstLineEnd = text.search(/\r?\n/);
+  const res = { direction: msg.direction };
+  if (idx >= 0 && firstLineEnd > 0 && idx < firstLineEnd) {
+    res.where = 'uri';
+    const qm = text.slice(0, firstLineEnd).match(new RegExp('[?&]([^=&\\s]+)=[^&\\s]*' + sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    if (qm) res.param = qm[1];
+  } else if (idx >= 0 && headEnd > 0 && idx > headEnd) {
+    res.where = 'body';
+    const body = text.slice(headEnd).trim();
+    const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const fm = body.match(new RegExp('(?:^|&)([^=&]+)=[^&]*' + esc)) || body.match(new RegExp('"([^"]+)"\\s*:\\s*"?[^"]*' + esc));
+    if (fm) res.param = decodeURIComponent(fm[1]);
+  } else if (idx >= 0) {
+    res.where = 'header';
+    const line = text.slice(text.lastIndexOf('\n', idx) + 1, text.indexOf('\n', idx) >= 0 ? text.indexOf('\n', idx) : undefined);
+    const hm = line.match(/^([A-Za-z0-9-]+):/);
+    if (hm) res.header = hm[1];
+  } else {
+    res.where = 'raw';
+  }
+  return res;
+}
+
+function useSelection() {
+  const sel = window.getSelection().toString();
+  if (!sel) { $('fl-meta').textContent = 'Select some text in the flow first (or click a Quick pick).'; return; }
+  applyPick(sel, locateSelection(sel));
+}
+
+/* Put a value + its location into whichever builder is open. */
+function applyPick(sel, loc) {
+  if (currentBuilder === 'sur') {
+    const server = loc.direction === 'server';
+    $('su-proto').value = 'http';
+    $('su-dir').value = server ? 'to_client' : 'to_server';
+    let buf = server ? 'http.response_body'
+      : loc.where === 'uri' ? 'http.uri'
+      : loc.where === 'body' ? 'http.request_body'
+      : loc.header && loc.header.toLowerCase() === 'user-agent' ? 'http.user_agent'
+      : loc.header && loc.header.toLowerCase() === 'cookie' ? 'http.cookie'
+      : loc.where === 'header' ? 'http.header' : 'http.uri';
+    const rows = $('su-matches').querySelectorAll('.match-row');
+    const empty = [...rows].find(r => !r.querySelector('.m-val').value);
+    if (empty) { empty.querySelector('.m-buf').value = buf; empty.querySelector('.m-val').value = sel; }
+    else addMatchRow(buf, 'contains', sel);
+    if (!$('su-msg').value) $('su-msg').value = `CUSTOM ${server ? 'response' : 'request'} contains ${sel.slice(0, 40)}`;
+  } else {
+    if (loc.direction === 'server') { $('cp-out').textContent = 'ctf_proxy rules here filter REQUESTS — pick text from the client → server part.'; return; }
+    let bareEndpoint = false;
+    if (loc.param) { $('cp-target').value = 'param'; $('cp-pname').value = loc.param; }
+    else if (loc.where === 'header' && loc.header) { $('cp-target').value = 'header'; $('cp-pname').value = loc.header; }
+    else if (loc.where === 'uri') { $('cp-target').value = 'path'; bareEndpoint = true; }
+    else if (loc.where === 'body') { $('cp-target').value = 'body'; }
+    else { $('cp-target').value = 'raw'; }
+    $('cp-value').value = sel;
+    // Only auto-fill the name while the user hasn't typed one by hand --
+    // otherwise a second pick (new target/value) would leave a stale name
+    // from the FIRST pick in place, describing something the rule no longer
+    // checks for (e.g. named after a JWT but the body now matches GraphQL).
+    if (!cpNameTouched) $('cp-name').value = (loc.param || loc.where || 'rule') + '_' + sel.replace(/\W+/g, '_').slice(0, 16);
+    cpTargetChanged();
+    // The exact mistake that took down /image-sharing/ earlier: picking the
+    // bare PATH (no query param, no body) blocks the whole endpoint, which
+    // the checker usually also calls for legitimate reasons. Warn loudly
+    // right here instead of letting it ship silently.
+    $('cp-out').textContent = bareEndpoint
+      ? `⚠ Bạn đang chọn PATH ("${sel}") — rule này sẽ chặn CẢ endpoint này, không chỉ phần độc hại.\n` +
+        'Nếu endpoint còn dùng cho việc hợp lệ (checker/người dùng thật), hãy chọn lại THAM SỐ hoặc nội dung body của payload tấn công thay vì path. ' +
+        'Chỉ giữ "the URL path" ở đây nếu bạn chắc endpoint này không có traffic hợp lệ nào.'
+      : '';
+  }
+  $('fl-meta').textContent = `Selection placed into the ${currentBuilder === 'sur' ? 'Suricata' : 'ctf_proxy'} builder (detected location: ${loc.where}${loc.param ? ', param ' + loc.param : ''}${loc.header ? ', header ' + loc.header : ''}).`;
+}
+
+/* ── Step 2a: Suricata builder ──────────────────────────────── */
+function bufferOptions(selected) {
+  const proto = $('su-proto').value;
+  const list = proto === 'http'
+    ? ($('su-dir').value === 'to_client' ? HTTP_RESP_BUFFERS : HTTP_REQ_BUFFERS)
+    : ['payload'];
+  return list.map(b => `<option ${b === selected ? 'selected' : ''}>${b}</option>`).join('');
+}
+
+function addMatchRow(buf, mode, value) {
+  const row = document.createElement('div');
+  row.className = 'match-row';
+  row.innerHTML = `
+    <select class="sel m-buf">${bufferOptions(buf)}</select>
+    <select class="sel m-mode"><option value="contains">contains</option><option value="regex">regex</option></select>
+    <input class="inp m-val" placeholder="value">
+    <span style="white-space:nowrap;">
+      <label class="chk"><input type="checkbox" class="m-nocase"> nocase</label>
+      <label class="chk"><input type="checkbox" class="m-neg"> NOT</label>
+      <label class="chk"><input type="checkbox" class="m-hex"> hex</label>
+      <button class="er-btn-sm m-del" title="remove">✗</button>
+    </span>`;
+  row.querySelector('.m-mode').value = mode || 'contains';
+  row.querySelector('.m-val').value = value || '';
+  row.querySelector('.m-del').onclick = () => row.remove();
+  $('su-matches').appendChild(row);
+}
+
+function refreshBufferSelects() {
+  $('su-matches').querySelectorAll('.m-buf').forEach(s => { s.innerHTML = bufferOptions(s.value); });
+}
+
+function suSpec() {
+  return {
+    msg: $('su-msg').value, proto: $('su-proto').value, direction: $('su-dir').value,
+    port: $('su-port').value || null, src_ip: $('su-src').value,
+    matches: [...$('su-matches').querySelectorAll('.match-row')].map(r => ({
+      buffer: r.querySelector('.m-buf').value, mode: r.querySelector('.m-mode').value,
+      value: r.querySelector('.m-val').value, nocase: r.querySelector('.m-nocase').checked,
+      negate: r.querySelector('.m-neg').checked, hex: r.querySelector('.m-hex').checked,
+    })),
+  };
+}
+
+async function suBuild(btn) {
+  await withBusy(btn, 'su-out', 'Generating...', async out => {
+    const d = await apiPost('/api/rules/suricata/build', suSpec());
+    if (d.errors && d.errors.length) { out.textContent = '✗ Fix these first:\n- ' + d.errors.join('\n- '); return; }
+    $('su-rule').value = d.rule;
+    out.textContent = '✓ Rule generated (sid ' + d.sid + '). Next: Test on recent traffic, then Add to ruleset.' +
+      (d.warnings.length ? '\n\n⚠ ' + d.warnings.join('\n⚠ ') : '');
+  });
+}
+
+function renderReplay(d) {
+  if (!d.ok) return '✗ ' + d.output;
+  let s = '✓ ' + d.output + '\n';
+  if (!d.total) return s + '\nNo matches. Either the attack is not in these pcaps (replay more files / check the flow time), or the rule is too narrow.';
+  s += '\nPer rule:\n' + Object.entries(d.by_sid).map(([sid, v]) => `  sid ${sid}: ${v.count} × ${v.signature}`).join('\n');
+  s += '\n\nSource IPs that triggered it:\n  ' + (d.distinct_sources || []).join(', ');
+  s += '\n\n⚠ If the checker bot / other legitimate clients are in that list, the rule is too broad to use for BLOCKING.';
+  s += '\n\nFirst matches:\n' + d.samples.slice(0, 15).map(m => `  ${(m.ts || '').slice(0, 19)}  ${m.src} → ${m.dst}  [${m.sid}]`).join('\n');
+  return s;
+}
+
+async function suTest(btn, rulesText, outId) {
+  if (!rulesText.trim()) { $(outId).textContent = 'Nothing to test — generate or write a rule first.'; return; }
+  await withBusy(btn, outId, 'Replaying traffic (can take a minute)...', async out => {
+    const d = await apiPost('/api/rules/suricata/test-traffic', { rules: rulesText, files: +$('su-files').value || 40 });
+    out.textContent = renderReplay(d);
+  });
+}
+
+function suAddToRuleset() {
+  const rule = $('su-rule').value.trim();
+  if (!rule) { $('su-out').textContent = 'Generate a rule first.'; return; }
+  const ta = $('rs-text');
+  if (ta.value.includes(rule)) { $('su-out').textContent = 'Already in the ruleset below.'; return; }
+  ta.value = ta.value.replace(/\s*$/, '\n') + `# added ${new Date().toISOString().slice(0, 19)} from rule builder\n${rule}\n`;
+  ta.scrollTop = ta.scrollHeight;
+  $('su-out').textContent = '✓ Added to the ruleset editor (3a). It is NOT live yet — press "Test syntax & Apply" there.';
+}
+
+/* ── Step 2b: ctf_proxy builder ─────────────────────────────── */
+function cpTargetChanged() {
+  const t = $('cp-target').value;
+  const show = t === 'param' || t === 'header';
+  $('cp-pname').style.display = show ? '' : 'none';
+  $('cp-pname-l').style.display = show ? '' : 'none';
+  $('cp-pname-l').textContent = t === 'header' ? 'Header name' : 'Parameter name';
+}
+
+async function cpBuild(btn) {
+  await withBusy(btn, 'cp-out', 'Generating...', async out => {
+    if (!$('cf-text').value.trim()) {
+      out.textContent = '⏳ Loading the current filter from the vulnbox first...';
+      const ok = await cfLoad();
+      if (!ok) { out.textContent = '✗ Could not load the current ctf_proxy filter (see 3b). Is ctf_proxy installed and the vulnbox reachable?'; return; }
+    }
+    const t = $('cp-target').value;
+    const spec = {
+      name: $('cp-name').value, target: t, mode: $('cp-mode').value, value: $('cp-value').value,
+      nocase: $('cp-nocase').checked, only_method: $('cp-meth').value, only_path_contains: $('cp-path').value,
+      param_name: t === 'param' ? $('cp-pname').value : '', header_name: t === 'header' ? $('cp-pname').value : '',
+    };
+    const d = await apiPost('/api/rules/ctfproxy/build', { spec, source: $('cf-text').value });
+    if (d.errors && d.errors.length) { out.textContent = '✗ Fix these first:\n- ' + d.errors.join('\n- '); return; }
+    $('cf-text').value = d.source;
+    // That name is now spent (used for the method just inserted) -- clear it
+    // so the next pick starts a fresh auto-name instead of reusing this one.
+    $('cp-name').value = '';
+    cpNameTouched = false;
+    out.textContent = `✓ Method ${d.name}() inserted into the filter (3b). NOT uploaded yet — review it, then "Check & Upload".\n` +
+      'Tip: test the same pattern as a Suricata rule first ("Test on recent traffic") to see if the checker would be blocked.\n\n' +
+      d.code + (d.warnings.length ? '\n⚠ ' + d.warnings.join('\n⚠ ') : '');
+  });
+}
+
+/* ── Step 3: live rulesets ──────────────────────────────────── */
+async function rsReload() {
+  const d = await apiGet('/api/rules/suricata');
+  $('rs-text').value = d.rules || '';
+  $('rs-out').textContent = d.note ? '✗ ' + d.note : '';
+}
+
+async function cfLoad() {
+  const d = await apiGet('/api/rules/ctfproxy');
+  if (!d.ok) { $('cf-out').textContent = '✗ ' + d.output; $('cp-state').className = 'state'; $('cp-state').textContent = ''; return false; }
+  $('cf-text').value = d.source;
+  $('cf-path').textContent = d.path;
+  $('cp-state').className = 'state ' + (d.paused ? 'state-paused' : 'state-running');
+  $('cp-state').textContent = d.paused ? 'PAUSED' : 'FILTERING';
+  $('cf-out').textContent = d.paused ? '! Filtering is PAUSED (Services tab). Uploads are saved and take effect on Resume.' : '';
+  return true;
+}
+
+async function rulesPrefillFromEvent(e) {
+  const raw = e.raw || {};
+  const flag = raw.flag || ((raw.message || '').match(/(?:outbound|service): (\S+)/) || [])[1];
+  $('fl-context').innerHTML = `<b>From event:</b> ${escHtml(e.type)} · ${escHtml(e.src_ip || '?')} → ${escHtml(e.dst_ip || '?')}` +
+    `${e.dst_port ? ':' + escHtml(String(e.dst_port)) : ''} · ${escHtml((raw.ts_packet || e.ts || '').slice(0, 19))}<br>${escHtml((e.message || '').slice(0, 160))}`;
+  $('fl-cands').innerHTML = '';
+  if (!$('su-msg').value) $('su-msg').value = `CUSTOM ${e.type}: ${(e.message || '').slice(0, 60)}`;
+  if (e.dst_port && [...$('su-port').options].some(o => o.value === String(e.dst_port))) $('su-port').value = String(e.dst_port);
+  const sid = e.sid || ((e.message || '').match(/^\[(\d+)\]/) || [])[1];
+  if (e.type === 'suricata' && sid) { if (!$('rs-text').value) await rsReload(); rulesShowSid(sid); }
+
+  $('fl-view').textContent = '⏳ Finding the Tulip flow for this event...';
+  const f = await flowForEvent(e);
+  if (!f.flow_id) {
+    $('fl-view').textContent = `✗ No Tulip flow found: ${f.why}.\n\nOpen Tulip (🌷 button at the top), filter by ${e.src_ip || ''} ${e.dst_ip || ''} around ` +
+      `${(raw.ts_packet || e.ts || '').slice(11, 19)} UTC, copy the flow URL and paste it in the box above.`;
+    return;
+  }
+  await loadFlow(f.flow_id, { highlight: flag });
+  const others = (f.candidates || []).filter(c => c.id !== f.flow_id);
+  $('fl-cands').innerHTML = (f.exact ? `<div class="cands">✓ ${escHtml(f.why)}.` : `<div class="cands">! ${escHtml(f.why)}.`) +
+    (flag ? ' The flag is <mark>marked</mark>; the request that got it is the CLIENT → SERVER part above it.' : '') +
+    (others.length ? '<br>Other possible flows: ' + others.map(c =>
+      `<button class="er-btn-sm" data-cand="${escHtml(c.id)}" title="${escHtml(c.id)}">${escHtml(c.src)} → ${escHtml(c.dst)} ${escHtml((c.time || '').slice(11, 19))}${(c.tags || []).includes('flag-out') ? ' [flag-out]' : ''}</button>`).join('') : '') + '</div>';
+  $('fl-cands').querySelectorAll('[data-cand]').forEach(b => b.onclick = () => loadFlow(b.dataset.cand, { highlight: flag }));
+}
+
+/* One-click from EVENTS: load the flow, auto-pick the narrowest safe
+   candidate (body/param over bare URL -- a bare path/URL gets REFUSED here,
+   not auto-applied, because blocking a whole path can take the legit
+   endpoint down with it; that exact mistake is what this guards against),
+   build the ctf_proxy rule and upload it in one shot. Returns a short status
+   string for the caller to show -- never throws. */
+/* Suricata only ALERTS -- it can never break the service -- so it's safe to
+   auto-apply even on a bare path/URL pick that ctf_proxy must refuse. */
+async function quickApplySuricata(best) {
+  currentBuilder = 'sur';
+  applyPick(best.value, best.loc);
+  if (!$('su-msg').value) $('su-msg').value = `AUTO quickblock: ${best.kind} ${best.value.slice(0, 40)}`;
+  const d = await apiPost('/api/rules/suricata/build', suSpec());
+  if (d.errors && d.errors.length) return { ok: false, msg: '✗ Suricata: ' + d.errors.join('; ') };
+  if (!$('rs-text').value) await rsReload();
+  const ta = $('rs-text');
+  if (!ta.value.includes(d.rule)) {
+    ta.value = ta.value.replace(/\s*$/, '\n') + `# auto-added ${new Date().toISOString().slice(0, 19)} from event quickblock\n${d.rule}\n`;
+  }
+  const ap = await apiPost('/api/rules/suricata', { rules: ta.value });
+  return { ok: ap.ok, msg: ap.ok ? `✓ Suricata sid ${d.sid} đang alert.` : '✗ Suricata apply: ' + ap.output };
+}
+
+async function quickBlockFromEvent(e) {
+  currentBuilder = 'cp';
+  await rulesPrefillFromEvent(e);
+  const picks = flowPicks;
+  if (!picks.length) return { ok: false, msg: 'Không tìm được request HTTP trong flow — không có gì để chặn tự động. Mở tab RULES để tự chọn.' };
+  const flag = (e.raw && e.raw.flag) || '';
+  // Prefer: the leaked flag itself > a body/param value > a query param > bare path/raw (ctf_proxy refuses this one below, Suricata doesn't need to).
+  const score = p => (flag && p.value.includes(flag) ? 100 : 0) + (p.loc.where === 'body' ? 50 : p.loc.where === 'uri' && p.loc.param ? 40 : p.loc.where === 'header' ? 20 : 0) + Math.min(p.value.length, 30);
+  const best = [...picks].sort((a, b) => score(b) - score(a))[0];
+  if (best.value.length < 4) {
+    return { ok: false, msg: `Chuỗi tìm được quá ngắn ("${best.value}") — dễ chặn nhầm traffic thường. Mở tab RULES để chọn tay.` };
+  }
+
+  // 1) Suricata (detect) -- always safe, always attempted.
+  const suRes = await quickApplySuricata(best);
+
+  // 2) ctf_proxy (block) -- refused when the only pick is a bare path/URL
+  //    with no param, same lesson as the /image-sharing/ incident: blocking
+  //    a whole endpoint by path risks blocking the checker too.
+  let cpRes;
+  if (best.loc.where === 'uri' && !best.loc.param) {
+    cpRes = { ok: false, msg: `ctf_proxy: chỉ có URL/path trần ("${best.value}") không có tham số cụ thể — KHÔNG tự chặn (dễ chặn luôn checker, như vụ /image-sharing/). Mở tab RULES để tự chọn đúng tham số/nội dung độc hại rồi chặn tay.` };
+  } else {
+    currentBuilder = 'cp';
+    applyPick(best.value, best.loc);
+    await cpBuild({ disabled: false, textContent: '' });   // withBusy only needs .disabled/.textContent; builder writes into cf-text
+    const errOut = $('cp-out').textContent;
+    if (errOut.startsWith('✗') || errOut.startsWith('⚠')) {
+      cpRes = { ok: false, msg: 'ctf_proxy: ' + errOut };
+    } else {
+      const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value });
+      cpRes = { ok: d.ok, msg: d.ok ? `✓ ctf_proxy đang chặn theo "${best.value.slice(0, 60)}".` : '✗ ctf_proxy: ' + d.output };
+    }
+  }
+
+  return { ok: suRes.ok || cpRes.ok, msg: `${suRes.msg}\n${cpRes.msg}\nXem/undo tại tab APPLIED.` };
+}
+
+
+/* A Suricata alert: tuning usually means editing the rule that fired. */
+function rulesShowSid(sid) {
+  const ta = $('rs-text');
+  const pos = ta.value.search(new RegExp('sid\\s*:\\s*' + sid + '\\s*;'));
+  if (pos < 0) { $('rs-out').textContent = `Alert came from sid ${sid} — not in the custom ruleset below (it is a built-in/ET rule).`; return; }
+  const start = ta.value.lastIndexOf('\n', pos) + 1;
+  const end = ta.value.indexOf('\n', pos);
+  ta.focus();
+  ta.setSelectionRange(start, end < 0 ? ta.value.length : end);
+  $('rs-out').textContent = `Alert came from sid ${sid} — that rule is selected in the editor. Edit/narrow it, then Test syntax & Apply.`;
+}
+
+/* ── Rule library ───────────────────────────────────────────── */
+async function libLoadList() {
+  const d = await apiGet('/api/rules/library');
+  const files = d.files || [];
+  $('lib-file').innerHTML =
+    files.map(f => `<option value="${escHtml(f.file)}">${escHtml(f.file)} — ${f.count} rules</option>`).join('') +
+    '<option value="__all__">— ALL files (' + files.reduce((n, f) => n + f.count, 0) + ' rules, nặng) —</option>';
+  if (files.length) $('lib-file').value = files[0].file;   // don't auto-load 3000+ rules
+  await libShow();
+}
+
+async function libShow() {
+  const v = $('lib-file').value;
+  const names = v === '__all__' ? [...$('lib-file').options].slice(1).map(o => o.value) : [v];
+  const texts = await Promise.all(names.map(n => apiGet('/api/rules/library/' + encodeURIComponent(n)).then(d => d.text || '')));
+  $('lib-text').value = texts.join('\n');
+  $('lib-info').textContent = 'folder: rules-library/suricata/';
+}
+
+/* Append library rules whose sid is not already in the editor. */
+function libMerge() {
+  const have = new Set(($('rs-text').value.match(/sid\s*:\s*\d+/g) || []).map(x => x.replace(/\D/g, '')));
+  const fresh = $('lib-text').value.split('\n').filter(l => {
+    const m = l.match(/^\s*alert\b.*sid\s*:\s*(\d+)/);
+    return m && !have.has(m[1]);
+  });
+  if (fresh.length)
+    $('rs-text').value = $('rs-text').value.replace(/\s*$/, '\n') +
+      `# added ${new Date().toISOString().slice(0, 19)} from rule library (${$('lib-file').value})\n` + fresh.join('\n') + '\n';
+  return fresh.length;
+}
+
+function rulesApplyMeta() {
+  const cur = $('su-port').value;
+  $('su-port').innerHTML = '<option value="">any port</option>' +
+    META.services.map(s => `<option value="${s.port}">${s.port} (${escHtml(s.name)})</option>`).join('');
+  $('su-port').value = cur || (META.services.length ? String(META.services[0].port) : '');
+}
+
+function initRules() {
+  rulesApplyMeta();
+  addMatchRow('http.uri', 'contains', '');
+  cpTargetChanged();
+
+  document.querySelectorAll('[data-builder]').forEach(b => b.onclick = () => {
+    currentBuilder = b.dataset.builder;
+    $('bd-sur').hidden = currentBuilder !== 'sur';
+    $('bd-cp').hidden = currentBuilder !== 'cp';
+    $('bt-sur').classList.toggle('active', currentBuilder === 'sur');
+    $('bt-cp').classList.toggle('active', currentBuilder === 'cp');
+  });
+  const manualLoad = () => { $('fl-context').textContent = ''; $('fl-cands').innerHTML = ''; loadFlow(); };
+  $('fl-load').onclick = manualLoad;
+  $('fl-id').addEventListener('keydown', e => { if (e.key === 'Enter') manualLoad(); });
+  $('fl-use').onclick = useSelection;
+  $('fl-picks').addEventListener('click', ev => {
+    const b = ev.target.closest('[data-pick]');
+    if (b) { const p = flowPicks[+b.dataset.pick]; applyPick(p.value, p.loc); }
+  });
+  $('su-proto').onchange = refreshBufferSelects;
+  $('su-dir').onchange = refreshBufferSelects;
+  $('su-addmatch').onclick = () => addMatchRow();
+  $('su-build').onclick = e => suBuild(e.target);
+  $('su-test').onclick = e => suTest(e.target, $('su-rule').value, 'su-out');
+  $('su-add').onclick = suAddToRuleset;
+  $('cp-del-shown').onclick = async e => {
+    const name = e.target.dataset.name;
+    if (!name || !confirm(`Bỏ rule "${name}" vừa chèn? Nếu đã bấm "Check & Upload" rồi thì xóa thật trên vulnbox; nếu chưa thì chỉ nạp lại filter gốc.`)) return;
+    e.target.disabled = true;
+    await apiPost('/api/rules/ctfproxy/delete', { name });   // no-op (ok:false, ignored) if it was never uploaded
+    await cfLoad();                                          // either way, reload what's actually live now
+    e.target.hidden = true; e.target.disabled = false;
+  };
+  $('cp-target').onchange = cpTargetChanged;
+  $('cp-build').onclick = e => cpBuild(e.target);
+  // After a successful build the name field holds the just-generated method's
+  // real name -- starting a fresh pick/build cycle should auto-name again
+  // unless the user types their own, so clear the "touched" flag there too.
+  $('cp-name').addEventListener('input', () => { cpNameTouched = $('cp-name').value.trim() !== ''; });
+
+  $('rs-reload').onclick = rsReload;
+  $('lib-file').onchange = libShow;
+  $('lib-test').onclick = e => suTest(e.target, $('lib-text').value, 'lib-out');
+  $('lib-add').onclick = async () => {
+    if (!$('rs-text').value) await rsReload();
+    const n = libMerge();
+    $('lib-out').textContent = n ? `✓ ${n} rule(s) added to the ruleset editor (3a). NOT live yet — press "Test syntax & Apply" there.`
+                                 : 'All rules of this file are already in the ruleset.';
+  };
+  $('lib-apply').onclick = e => {
+    if ($('lib-file').value === '__all__' && !confirm('Áp TẤT CẢ hơn 3000 rule vào Suricata? Rất nhiều — nên chọn từng file. Vẫn tiếp tục?')) return;
+    withBusy(e.target, 'lib-out', 'Adding & applying...', async out => {
+    await rsReload();                        // start from what is live, not from unsaved edits
+    const n = libMerge();
+    if (!n) { out.textContent = 'All rules of this file are already live.'; return; }
+    const d = await apiPost('/api/rules/suricata', { rules: $('rs-text').value });
+    showResult(out, d);
+    out.textContent = (d.ok ? `✓ ${n} rule(s) added and live.\n\n` : `✗ Not applied (live ruleset unchanged).\n\n`) + out.textContent;
+    showToast(d.ok ? `Library: ${n} rules live` : 'Library apply rejected — see output', d.ok ? 'success' : 'critical');
+  });
+  };
+  $('rs-test').onclick = e => suTest(e.target, $('rs-text').value, 'rs-out');
+  $('rs-apply').onclick = e => withBusy(e.target, 'rs-out', 'Testing syntax & applying...', async out => {
+    const d = await apiPost('/api/rules/suricata', { rules: $('rs-text').value });
+    showResult(out, d);
+    showToast(d.ok ? 'Suricata rules applied' : 'Rules rejected — see output', d.ok ? 'success' : 'critical');
+  });
+  $('rs-rollback').onclick = e => {
+    if (!confirm('Restore the previous Suricata ruleset?')) return;
+    withBusy(e.target, 'rs-out', 'Rolling back...', async out => {
+      const d = await apiPost('/api/rules/suricata/rollback');
+      showResult(out, d);
+      if (d.rules) $('rs-text').value = d.rules;
+    });
+  };
+  $('cf-load').onclick = e => withBusy(e.target, 'cf-out', 'Loading from vulnbox...', async () => { await cfLoad(); });
+  $('cf-apply').onclick = e => {
+    if (!confirm('Upload this filter to ctf_proxy? Rules start BLOCKING immediately (unless filtering is paused).')) return;
+    withBusy(e.target, 'cf-out', 'Checking & uploading...', async out => {
+      const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value });
+      showResult(out, d);
+      showToast(d.ok ? 'ctf_proxy filter uploaded' : 'Upload rejected — see output', d.ok ? 'success' : 'critical');
+    });
+  };
+  $('cf-rollback').onclick = e => {
+    if (!confirm('Restore the previous ctf_proxy filter?')) return;
+    withBusy(e.target, 'cf-out', 'Rolling back...', async out => {
+      const d = await apiPost('/api/rules/ctfproxy/rollback');
+      showResult(out, d);
+      if (d.source) $('cf-text').value = d.source;
+    });
+  };
+}

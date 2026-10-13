@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTF Monitor Hub</title>
+  <!-- No web fonts: the competition machine is air-gapped; system fonts only. -->
+  <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+
+<!-- ── Header + tab navigation ───────────────────────────────── -->
+<header>
+  <div class="header-left">
+    <div class="logo-mark">🛡</div>
+    <div class="header-title">
+      <h1>CTF Monitor Hub</h1>
+      <span id="team-id">Loading...</span>
+    </div>
+  </div>
+  <nav class="tabnav" id="tabnav">
+    <button data-tab="monitor">MONITOR</button>
+    <button data-tab="events">EVENTS</button>
+    <button data-tab="hunt">HUNT</button>
+    <button data-tab="rules">RULES</button>
+    <button data-tab="applied">APPLIED</button>
+    <button data-tab="services">SERVICES</button>
+    <button data-tab="config">CONFIG</button>
+  </nav>
+  <div class="header-right">
+    <div class="conn-status">
+      <div class="conn-dot" id="conn-dot"></div>
+      <span id="conn-label">Connecting...</span>
+    </div>
+    <div class="clock" id="clock">--:--:--</div>
+    <label class="chk" title="Kêu còi khi có alert CRITICAL (tấn công)"><input type="checkbox" id="snd-toggle" checked> 🔊 còi</label>
+    <button class="tulip-btn" id="snd-test" title="Nghe thử còi báo động">test</button>
+    <a class="tulip-btn" id="tulip-link" href="#" target="_blank">🌷 Tulip UI</a>
+  </div>
+</header>
+
+<!-- ══ TAB: MONITOR ═════════════════════════════════════════════ -->
+<section class="tab" id="tab-monitor">
+<!-- ── Stats Bar ─────────────────────────────────────────────── -->
+<div class="stats-bar">
+  <div class="stat-tile critical">
+    <div class="stat-icon">🚩</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-flag-out">0</div>
+      <div class="stat-label">Flag Exfil</div>
+    </div>
+  </div>
+  <div class="stat-tile critical">
+    <div class="stat-icon">🍯</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-honeytoken">0</div>
+      <div class="stat-label">Honeytoken</div>
+    </div>
+  </div>
+  <div class="stat-tile high">
+    <div class="stat-icon">⚡</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-suricata">0</div>
+      <div class="stat-label">Suricata</div>
+    </div>
+  </div>
+  <div class="stat-tile high">
+    <div class="stat-icon">📡</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-sla">0</div>
+      <div class="stat-label">SLA Events</div>
+    </div>
+  </div>
+  <div class="stat-tile hint">
+    <div class="stat-icon">🤖</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-hints">0</div>
+      <div class="stat-label">ML Hints</div>
+    </div>
+  </div>
+  <div class="stat-tile green">
+    <div class="stat-icon">🕒</div>
+    <div class="stat-info">
+      <div class="stat-value" id="stat-uptime">00:00</div>
+      <div class="stat-label">Match Time</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── System Status (is the pipeline itself actually running?) ── -->
+<div class="panel" id="status-panel" style="margin-bottom:12px;">
+  <div class="panel-header">
+    <div class="panel-title">
+      <span>🩺</span> System Status
+      <span class="panel-badge badge-green" id="status-badge">—</span>
+    </div>
+    <span style="font-size:9px;color:var(--text-dim);font-family:var(--font-mono);" id="status-staleness"></span>
+  </div>
+  <div class="service-list" id="status-list" style="flex-wrap:wrap;flex-direction:row;">
+    <div style="padding:16px;text-align:center;color:var(--text-dim);font-size:11px;">Loading...</div>
+  </div>
+</div>
+
+<!-- ── Main Grid ─────────────────────────────────────────────── -->
+<div class="main-grid">
+
+  <!-- Left: Alert Feed -->
+  <div class="panel" id="alert-panel">
+    <div class="panel-header">
+      <div class="panel-title">
+        <span>⚡</span> Alert Feed
+        <span class="panel-badge badge-red" id="total-alert-badge">0</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button class="filter-btn active" id="filter-all" onclick="setFilter('all')">ALL</button>
+        <button class="filter-btn" id="filter-critical" onclick="setFilter('critical')">CRITICAL</button>
+        <button class="filter-btn" id="filter-hints" onclick="setFilter('hints')">HINTS</button>
+      </div>
+    </div>
+    <div class="priority-legend">
+      <span style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono);">PRIORITY:</span>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-red)"></div>flag-out / honeytoken</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-orange)"></div>suricata / sla-down</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-yellow)"></div>sla-slow</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-purple)"></div>ml-hints (low confidence)</div>
+    </div>
+    <div class="alert-list" id="alert-list">
+      <div class="empty-state">
+        <div class="icon">📡</div>
+        <p>No alerts yet.<br>Waiting for detection events...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right column -->
+  <div class="right-col">
+
+    <!-- Watchdog Status -->
+    <div class="panel" id="watchdog-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>📡</span> Service Watchdog
+          <span class="panel-badge badge-green" id="watchdog-badge">—</span>
+        </div>
+      </div>
+      <div class="service-list" id="service-list">
+        <div style="padding:16px;text-align:center;color:var(--text-dim);font-size:11px;">
+          Polling vulnbox services...
+        </div>
+      </div>
+    </div>
+
+    <!-- ML Hints -->
+    <div class="panel" id="hints-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>🤖</span> ML Bot Hints
+          <span class="panel-badge badge-purple" id="hints-badge">0</span>
+        </div>
+        <span style="font-size:9px;color:var(--text-dim);font-family:var(--font-mono);">HINT ONLY — human review required</span>
+      </div>
+      <div class="hint-list" id="hint-list">
+        <div style="padding:16px;text-align:center;color:var(--text-dim);font-size:11px;">
+          Warming up fingerprinter... (~3 ticks)
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</section>
+
+<!-- ══ TAB: EVENTS ══════════════════════════════════════════════ -->
+<section class="tab tab-page" id="tab-events" hidden>
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title"><span>🗂</span> All events <span class="panel-badge badge-cyan" id="ev-count">—</span></div>
+    </div>
+    <div class="help">Every source in one list: flag-out, honeytoken, Suricata, SLA watchdog, OS watchdog, ML hints,
+      and every change made from this dashboard. Severity is written as text.
+      <b>Tulip flow</b> = the captured connection behind the alert, found automatically by time + IPs (+ flag text):
+      <b>✓</b> exact match · <b>~</b> closest in time, verify · <b>—</b> none found. Click it to open in Tulip.
+      <b>Make rule</b> loads that flow into the Rules tab.</div>
+    <div class="er-toolbar">
+      <input class="ioc-input" id="ev-q" placeholder="Search anything: IP, flag, signature, path, type..." />
+      <select class="er-select" id="ev-source">
+        <option value="">All sources</option>
+        <option value="detection">detection</option>
+        <option value="watchdog">watchdog (SLA)</option>
+        <option value="os-watchdog">os-watchdog</option>
+        <option value="ml-fingerprint">ml-fingerprint</option>
+        <option value="host-agent">host-agent (changes made here)</option>
+      </select>
+      <select class="er-select" id="ev-sev">
+        <option value="">All severities</option>
+        <option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option>
+      </select>
+      <button class="btn" id="ev-search">Search</button>
+      <label class="chk"><input type="checkbox" id="ev-auto" checked> auto-refresh</label>
+      <a class="btn" id="ev-export" href="/api/events.log" target="_blank" style="text-decoration:none;">Open as .log</a>
+    </div>
+    <div class="er-table-wrap" style="max-height:calc(100vh - 260px);">
+      <table class="er-table">
+        <thead><tr><th>Time (UTC)</th><th>Severity</th><th>Source / Type</th><th>Src → Dst</th><th>Tulip flow</th><th>Message</th><th></th></tr></thead>
+        <tbody id="ev-body"><tr><td colspan="7" class="er-empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ══ TAB: RULES ═══════════════════════════════════════════════ -->
+<section class="tab tab-page" id="tab-rules" hidden>
+  <div class="panel">
+    <div class="help" style="padding-top:8px;">
+      <b>Two kinds of rule, two jobs.</b> <b>Suricata</b> only <i>detects</i> (raises an alert in Events) — it watches a copy of the traffic and
+      can never break your service. <b>ctf_proxy</b> actually <i>blocks</i> (drops the connection) — a too-broad rule here also blocks the
+      checker bot and costs SLA. Workflow: load the attack from Tulip → select the malicious part → build a rule →
+      <b>test it on recent traffic</b> to see what else it would hit → apply. Everything you apply is backed up and can be rolled back.
+    </div>
+  </div>
+
+  <div class="two-col">
+    <!-- step 1: the attack -->
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><span>1</span> The attack (from a Tulip flow)</div></div>
+      <div class="row-actions">
+        <input class="inp" id="fl-id" placeholder="Tulip flow id or the Tulip page URL (…/flow/&lt;id&gt;)" style="flex:1;min-width:240px;">
+        <button class="btn" id="fl-load">Load flow</button>
+      </div>
+      <div id="fl-context" class="help" style="padding-top:0;"></div>
+      <div id="fl-cands"></div>
+      <div class="help" style="padding-bottom:2px;"><b>Quick picks</b> — parts of the request (client → server), click one to put it into the open builder.
+        Or select any text in the flow with the mouse and press <b>Use selection</b>.</div>
+      <div id="fl-picks" class="picks"></div>
+      <div class="row-actions"><button class="btn primary" id="fl-use">⇩ Use selection as match value</button><span id="fl-meta" class="help" style="padding:0;"></span></div>
+      <div class="flowview" id="fl-view">(no flow loaded)</div>
+    </div>
+
+    <!-- step 2: builders -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title"><span>2</span> Build a rule</div>
+        <div class="subtabs" style="padding:0;">
+          <button class="filter-btn active" id="bt-sur" data-builder="sur">SURICATA (detect)</button>
+          <button class="filter-btn" id="bt-cp" data-builder="cp">CTF_PROXY (block)</button>
+        </div>
+      </div>
+
+      <div id="bd-sur">
+        <div class="form-grid">
+          <label>Message</label><input class="inp" id="su-msg" placeholder="what this detects, e.g. SQLi on /login username">
+          <label>Protocol</label><select class="sel" id="su-proto"><option>http</option><option>tcp</option><option>udp</option></select>
+          <label>Direction</label><select class="sel" id="su-dir"><option value="to_server">client → server (requests, attacks)</option><option value="to_client">server → client (responses, leaks)</option></select>
+          <label>Service port</label><select class="sel" id="su-port"></select>
+          <label>Only from IP</label><input class="inp" id="su-src" placeholder="optional — blank = any source">
+        </div>
+        <div id="su-matches"></div>
+        <div class="row-actions">
+          <button class="btn" id="su-addmatch">+ condition</button>
+          <button class="btn primary" id="su-build">Generate</button>
+        </div>
+        <textarea class="code" id="su-rule" placeholder="generated rule appears here (you can also edit it)" style="margin:0 8px;width:calc(100% - 16px);min-height:70px;"></textarea>
+        <div class="row-actions">
+          <label class="chk">replay last <input class="inp" id="su-files" type="number" value="40" min="1" max="300" style="width:70px;"> pcaps</label>
+          <button class="btn" id="su-test">Test on recent traffic</button>
+          <button class="btn primary" id="su-add">Add to ruleset ⇩</button>
+        </div>
+        <pre class="out" id="su-out"></pre>
+      </div>
+
+      <div id="bd-cp" hidden>
+        <div class="form-grid">
+          <label>Rule name</label><input class="inp" id="cp-name" placeholder="e.g. sqli_login (letters/digits/_)">
+          <label>Look at</label>
+          <select class="sel" id="cp-target">
+            <option value="param">a request parameter (GET/POST/JSON)</option>
+            <option value="body">the raw request body</option>
+            <option value="path">the URL path</option>
+            <option value="url">the full URL (path + query)</option>
+            <option value="query_string">the query string</option>
+            <option value="header">a request header</option>
+            <option value="method">the HTTP method</option>
+            <option value="raw">the whole raw request</option>
+          </select>
+          <label id="cp-pname-l">Parameter name</label><input class="inp" id="cp-pname" placeholder="e.g. username">
+          <label>Match</label><select class="sel" id="cp-mode"><option value="contains">contains</option><option value="equals">equals</option><option value="regex">regex</option></select>
+          <label>Value</label><input class="inp" id="cp-value" placeholder="the malicious part">
+          <label>Options</label><span><label class="chk"><input type="checkbox" id="cp-nocase" checked> ignore case</label></span>
+          <label>Only method</label><select class="sel" id="cp-meth"><option value="">any</option><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select>
+          <label>Only if path has</label><input class="inp" id="cp-path" placeholder="optional, e.g. /login — narrows the rule">
+        </div>
+        <div class="row-actions">
+          <button class="btn primary" id="cp-build">Generate &amp; insert into filter ⇩</button>
+          <button class="btn danger" id="cp-del-shown" hidden title="xóa rule đang hiển thị">✗ Xóa rule này</button>
+        </div>
+        <pre class="out" id="cp-out"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- library: prepared alert rules -->
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title"><span>📚</span> Rule library — prepared Suricata ALERT rules</div></div>
+    <div class="help">Files from <code>rules-library/suricata/</code> in the repo (scanners, SQLi, NoSQLi, SSTI, SSRF, GraphQL, traversal/LFI,
+      command injection, deserialization/XXE, upload/webshell, flag exfil, XSS/misc). They only <b>alert</b> — they never block.
+      <b>Add &amp; apply now</b> appends the chosen file to the live ruleset (rules already present are skipped), checks syntax and reloads Suricata.
+      You can also copy a file's content and paste it into (3a) by hand.</div>
+    <div class="row-actions">
+      <select class="sel" id="lib-file" style="min-width:320px;"></select>
+      <button class="btn" id="lib-test">Test on recent traffic</button>
+      <button class="btn" id="lib-add">Add to ruleset (3a)</button>
+      <button class="btn primary" id="lib-apply">Add &amp; apply now</button>
+      <span class="help" style="padding:0;" id="lib-info"></span>
+    </div>
+    <textarea class="code" id="lib-text" readonly spellcheck="false" style="margin:0 8px;width:calc(100% - 16px);min-height:160px;"></textarea>
+    <pre class="out" id="lib-out"></pre>
+  </div>
+
+  <!-- step 3: live rulesets -->
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><span>3a</span> Suricata ruleset (live)</div></div>
+      <div class="row-actions">
+        <button class="btn" id="rs-reload">Reload from disk</button>
+        <button class="btn" id="rs-test">Test whole ruleset on traffic</button>
+        <button class="btn primary" id="rs-apply">Test syntax &amp; Apply</button>
+        <button class="btn danger" id="rs-rollback">Rollback last change</button>
+      </div>
+      <textarea class="code" id="rs-text" spellcheck="false" style="margin:0 8px;width:calc(100% - 16px);min-height:300px;"></textarea>
+      <pre class="out" id="rs-out"></pre>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><span>3b</span> ctf_proxy filter (on vulnbox) <span class="state" id="cp-state"></span></div></div>
+      <div class="row-actions">
+        <button class="btn" id="cf-load">Load from vulnbox</button>
+        <button class="btn primary" id="cf-apply">Check &amp; Upload</button>
+        <button class="btn danger" id="cf-rollback">Rollback last upload</button>
+        <span class="help" style="padding:0;" id="cf-path"></span>
+      </div>
+      <textarea class="code" id="cf-text" spellcheck="false" style="margin:0 8px;width:calc(100% - 16px);min-height:300px;"></textarea>
+      <pre class="out" id="cf-out"></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ══ TAB: SERVICES ════════════════════════════════════════════ -->
+<section class="tab tab-page" id="tab-services" hidden>
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title"><span>⚙</span> Services</div>
+      <button class="btn" id="sv-refresh">Refresh</button>
+    </div>
+    <div class="help">Start / Stop / Restart keep each container's configuration. <b>ctf_proxy → Pause filtering</b> turns every rule off
+      while traffic keeps flowing (use it first if you suspect a rule is blocking the checker). <b>Uninstall</b> is the emergency exit:
+      it takes ctf_proxy out of the path and gives the port back to your service (a few seconds of downtime).
+      Dashboard and Redis are protected — a button here could cut off this very page.</div>
+    <div class="er-table-wrap" style="max-height:none;">
+      <table class="er-table svc-table">
+        <thead><tr><th>Service</th><th>State</th><th>Detail</th><th>Actions</th></tr></thead>
+        <tbody id="sv-body"><tr><td colspan="4" class="er-empty">Loading (checks the vulnbox over SSH, a few seconds)...</td></tr></tbody>
+      </table>
+    </div>
+    <pre class="out" id="sv-out"></pre>
+  </div>
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title"><span>⛔</span> Fallback block — vulnbox firewall (iptables)</div>
+      <button class="btn" id="fw-refresh">Refresh list</button></div>
+    <div class="help"><b>Dùng khi KHÔNG có ctf_proxy.</b> Suricata chỉ cảnh báo (đọc pcap ngoài luồng), không chặn được.
+      Điểm chặn inline là ctf_proxy; nếu không có, cách chặn duy nhất là firewall trên vulnbox — <b>chặn theo IP</b> (thô nhưng hiệu quả,
+      vì vulnbox thấy IP thật ở card mạng ngoài). <b>Cảnh báo:</b> chặn nhầm IP của checker = mất SLA. IP checker (gameserver) bị từ chối sẵn.
+      Cần passwordless sudo trên vulnbox. Mọi drop nằm trong chain <code>CTFBLOCK</code>.</div>
+    <div class="row-actions">
+      <input class="inp" id="fw-ip" placeholder="IP kẻ tấn công, vd 10.13.9.21" style="min-width:220px;">
+      <button class="btn danger" id="fw-block">Block IP</button>
+      <button class="btn" id="fw-unblock">Unblock IP</button>
+    </div>
+    <pre class="out" id="fw-out"></pre>
+    <div class="er-table-wrap"><table class="er-table"><thead><tr><th>IP đang bị chặn (CTFBLOCK)</th><th></th></tr></thead>
+      <tbody id="fw-body"><tr><td colspan="2" class="er-empty">Chưa tải — bấm Refresh list.</td></tr></tbody></table></div>
+  </div>
+</section>
+
+<!-- ══ TAB: CONFIG ══════════════════════════════════════════════ -->
+<section class="tab tab-page" id="tab-config" hidden>
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><span>⚡</span> Quick edit</div></div>
+      <div class="help">The fields organizers most often change. Editing here updates the JSON on the right — then Validate / Save &amp; apply.</div>
+      <div class="form-grid" id="qc-form"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><span>{}</span> services.json</div></div>
+      <div class="row-actions">
+        <button class="btn" id="cg-reload">Reload</button>
+        <button class="btn" id="cg-validate">Validate</button>
+        <button class="btn" id="cg-save">Save only</button>
+        <button class="btn primary" id="cg-apply">Save &amp; apply (re-deploy)</button>
+        <button class="btn danger" id="cg-rollback">Rollback</button>
+        <button class="btn" id="cg-log">Show redeploy log</button>
+      </div>
+      <textarea class="code" id="cg-text" spellcheck="false" style="margin:0 8px;width:calc(100% - 16px);min-height:420px;"></textarea>
+      <pre class="out" id="cg-out"></pre>
+    </div>
+  </div>
+</section>
+
+
+
+
+<!-- ══ TAB: HUNT ════════════════════════════════════════════════ -->
+<section class="tab tab-page" id="tab-hunt" hidden>
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title"><span>🔎</span> Hunt — look back at what happened</div></div>
+    <div class="help">Searches the event log <b>and</b> every captured connection in Tulip (request + response text).
+      Fill any combination; empty = no filter. Times are UTC. Example: attacker IP + last 1h → everything that IP did;
+      text <code>huhu.php</code> → every request/response that mentions it.</div>
+    <div class="form-grid">
+      <label>IP (src or dst)</label><input class="inp" id="hu-ip" placeholder="10.13.9.21">
+      <label>Service port</label><input class="inp" id="hu-port" placeholder="8003">
+      <label>From (UTC)</label><input class="inp" id="hu-since" type="datetime-local" step="1">
+      <label>To (UTC)</label><input class="inp" id="hu-until" type="datetime-local" step="1">
+      <label>Text in traffic / event</label><input class="inp" id="hu-text" placeholder="cmd= , ../ , UNION , a flag ...">
+      <label></label><label class="chk"><input type="checkbox" id="hu-regex"> text is a regex</label>
+    </div>
+    <div class="row-actions">
+      <button class="btn" data-range="15">last 15 min</button>
+      <button class="btn" data-range="60">last 1 h</button>
+      <button class="btn" data-range="360">last 6 h</button>
+      <button class="btn" data-range="0">all time</button>
+      <button class="btn primary" id="hu-go">Search</button>
+    </div>
+    <pre class="out" id="hu-summary"></pre>
+  </div>
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><span>🗂</span> Events <span class="panel-badge badge-cyan" id="hu-ev-n">—</span></div></div>
+      <div class="er-table-wrap" style="max-height:60vh;">
+        <table class="er-table"><thead><tr><th>Time (UTC)</th><th>Severity</th><th>Type</th><th>Src → Dst</th><th>Message</th><th></th></tr></thead>
+        <tbody id="hu-ev"></tbody></table>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><span>🌷</span> Tulip flows <span class="panel-badge badge-cyan" id="hu-fl-n">—</span></div></div>
+      <div class="er-table-wrap" style="max-height:60vh;">
+        <table class="er-table"><thead><tr><th>Time (UTC)</th><th>Client → Service</th><th>Tags</th><th></th></tr></thead>
+        <tbody id="hu-fl"></tbody></table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ TAB: APPLIED (what is live, where, how often it fired) ═══ -->
+<section class="tab tab-page" id="tab-applied" hidden>
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title"><span>📋</span> Applied rules</div>
+      <button class="btn" id="ap-refresh">Refresh</button></div>
+    <div class="help">Every rule that is live now, <b>where</b> it runs, and how often it fired (counted from the stored events).
+      <b>Suricata</b> rules only alert. <b>ctf_proxy</b> rules block; a block is counted when the captured response carries ctf_proxy's
+      block answer. A ctf_proxy rule that hits the <b>checker</b> shows up here as blocks from the checker's IP — pause filtering then.</div>
+    <pre class="out" id="ap-where"></pre>
+  </div>
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title"><span>🛡</span> ctf_proxy — BLOCKING (vulnbox) <span class="state" id="ap-cp-state"></span></div>
+      <button class="btn" id="ap-cp-load">Load rule list from vulnbox</button></div>
+    <div class="er-table-wrap"><table class="er-table"><thead><tr><th>Rule (method)</th><th>Blocks</th><th>Last block</th><th>Blocked clients</th><th></th></tr></thead>
+      <tbody id="ap-cp"></tbody></table></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title"><span>🔔</span> Suricata — ALERT (monitor host) <span class="panel-badge badge-cyan" id="ap-su-n">—</span></div>
+      <label class="chk"><input type="checkbox" id="ap-only-hit"> only rules that fired</label></div>
+    <div class="er-table-wrap" style="max-height:60vh;"><table class="er-table"><thead><tr><th>sid</th><th>Rule</th><th>Hits</th><th>Last hit</th><th>Top sources</th><th></th></tr></thead>
+      <tbody id="ap-su"></tbody></table></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title"><span>⚙</span> Built-in detectors (always on)</div></div>
+    <div class="er-table-wrap"><table class="er-table"><thead><tr><th>Event type</th><th>Count</th><th>What raises it</th></tr></thead>
+      <tbody id="ap-bi"></tbody></table></div>
+  </div>
+</section>
+
+<!-- ── Footer ─────────────────────────────────────────────────── -->
+<footer>
+  <span>CTF Monitor Hub v1.0 — Air-gap Ready</span>
+  <span id="footer-vulnbox">Vulnbox: —</span>
+  <span id="footer-monitor">Monitor: —</span>
+  <span>⚠️ NO AUTO-BLOCKING — HUMAN DECISION ONLY</span>
+</footer>
+
+<!-- ── Modal ─────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="modal-title">Alert Detail</div>
+      <div class="modal-close" onclick="closeModal()">✕</div>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<!-- ── Toast container ──────────────────────────────────────── -->
+<div id="toast-container"></div>
+
+<script src="/static/js/core.js"></script>
+<script src="/static/js/monitor.js"></script>
+<script src="/static/js/status.js"></script>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/events.js"></script>
+<script src="/static/js/rules.js"></script>
+<script src="/static/js/hunt.js"></script>
+<script src="/static/js/applied.js"></script>
+<script src="/static/js/services.js"></script>
+<script src="/static/js/config.js"></script>
+<script src="/static/js/main.js"></script>
+</body>
+</html>

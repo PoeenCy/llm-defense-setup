@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# pull-and-save.sh — Pull all required Docker images, Ollama models, Python wheels,
-#                     and clone repos into offline-bundle/ for air-gapped deployment.
+# pull-and-save.sh — Pull all required Docker images, Python wheels, and clone
+#                     repos into offline-bundle/ for air-gapped deployment.
 # Run this ONCE while you have internet. Takes ~20-40 min depending on bandwidth.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG="$SCRIPT_DIR/services.json"
+CONFIG="$SCRIPT_DIR/contest-runtime/config/services.json"
 BUNDLE="$SCRIPT_DIR/offline-bundle"
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -16,11 +16,7 @@ die()  { echo -e "${RED}[FATAL]${NC} $*"; exit 1; }
 
 [[ -f "$CONFIG" ]] || die "services.json not found at $SCRIPT_DIR"
 
-# Parse config
-LLM_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['llm_model'])")
-EMBED_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['embed_model'])")
-
-mkdir -p "$BUNDLE/images" "$BUNDLE/wheels" "$BUNDLE/repos" "$BUNDLE/ollama-models"
+mkdir -p "$BUNDLE/images" "$BUNDLE/wheels" "$BUNDLE/repos"
 
 echo ""
 echo "======================================================"
@@ -35,10 +31,8 @@ echo ""
 log "Pulling Docker images..."
 
 IMAGES=(
-    "mongo:7.0"
     "redis:7-alpine"
     "jasonish/suricata:7.0"
-    "mintplexlabs/anythingllm:latest"
     "python:3.11-slim"
     "alpine:3.19"
 )
@@ -94,7 +88,6 @@ log "Downloading Python wheels..."
 PACKAGES=(
     "fastapi>=0.111.0"
     "uvicorn[standard]>=0.29.0"
-    "pymongo>=4.7.0"
     "redis>=5.0.0"
     "scapy>=2.5.0"
     "requests>=2.31.0"
@@ -117,7 +110,6 @@ PACKAGES=(
     "paramiko>=3.4.0"
     "jinja2>=3.1.0"
     "aiohttp>=3.9.0"
-    "ollama>=0.2.0"
 )
 
 pip download "${PACKAGES[@]}" \
@@ -158,65 +150,13 @@ for name in "${!REPOS[@]}"; do
 done
 
 # ============================================================
-# 4. Ollama Models
-# ============================================================
-log "Pulling Ollama models (this may take a while — 4-6 GB)..."
-
-# Ensure Ollama is running
-if ! pgrep -x ollama > /dev/null; then
-    log "Starting Ollama service temporarily..."
-    ollama serve &>/dev/null &
-    OLLAMA_PID=$!
-    sleep 3
-    trap "kill $OLLAMA_PID 2>/dev/null || true" EXIT
-fi
-
-MODELFILE="$SCRIPT_DIR/ioc-brain/Foundation-Sec.Modelfile"
-if [[ -f "$MODELFILE" ]]; then
-    log "  Building LLM (pulls base GGUF + applies chat template): $LLM_MODEL"
-    ollama create "$LLM_MODEL" -f "$MODELFILE" || warn "LLM build failed: $LLM_MODEL — try manually: ollama create $LLM_MODEL -f $MODELFILE"
-else
-    log "  Pulling LLM: $LLM_MODEL"
-    ollama pull "$LLM_MODEL" || warn "LLM pull failed: $LLM_MODEL — try manually: ollama pull $LLM_MODEL"
-fi
-
-log "  Pulling embedding model: $EMBED_MODEL"
-ollama pull "$EMBED_MODEL" || warn "Embed model pull failed: $EMBED_MODEL"
-
-# Copy Ollama model blobs to bundle
-# Default varies by install: systemd service (user "ollama") stores under
-# /usr/share/ollama/.ollama/models and is root/ollama-owned (mode 700); a
-# user-level install uses $HOME/.ollama/models. Respect OLLAMA_MODELS if set.
-if [[ -n "${OLLAMA_MODELS:-}" ]]; then
-    OLLAMA_HOME="$OLLAMA_MODELS"
-elif [[ -d "$HOME/.ollama/models" ]]; then
-    OLLAMA_HOME="$HOME/.ollama"
-elif [[ -d "/usr/share/ollama/.ollama/models" ]]; then
-    OLLAMA_HOME="/usr/share/ollama/.ollama"
-else
-    OLLAMA_HOME="$HOME/.ollama"
-fi
-
-if [[ -r "$OLLAMA_HOME/models" ]]; then
-    log "Copying Ollama model blobs to bundle (from $OLLAMA_HOME)..."
-    rsync -a --info=progress2 "$OLLAMA_HOME/" "$BUNDLE/ollama-models/" 2>/dev/null || \
-    cp -r "$OLLAMA_HOME/." "$BUNDLE/ollama-models/"
-    ok "Ollama models copied"
-elif [[ -d "$OLLAMA_HOME/models" ]]; then
-    warn "Ollama model directory found at $OLLAMA_HOME but not readable by $(whoami) — run:"
-    warn "  sudo rsync -a $OLLAMA_HOME/ $BUNDLE/ollama-models/ && sudo chown -R $(id -u):$(id -g) $BUNDLE/ollama-models/"
-else
-    warn "Ollama model directory not found at $OLLAMA_HOME — models may not be bundled"
-fi
-
-# ============================================================
-# 5. Copy services.json into bundle
+# 4. Copy services.json into bundle
 # ============================================================
 cp "$CONFIG" "$BUNDLE/services.json"
 ok "Copied services.json into bundle"
 
 # ============================================================
-# 6. Write manifest
+# 5. Write manifest
 # ============================================================
 cat > "$BUNDLE/MANIFEST.txt" << MANIFEST
 CTF Monitor Hub — Offline Bundle Manifest
@@ -231,10 +171,6 @@ $(ls "$BUNDLE/wheels/"*.whl 2>/dev/null | wc -l) wheel files
 
 == Repos ==
 $(ls "$BUNDLE/repos/" 2>/dev/null || echo "none")
-
-== Ollama Models ==
-LLM:   $LLM_MODEL
-Embed: $EMBED_MODEL
 MANIFEST
 
 ok "Bundle manifest written"
@@ -242,7 +178,7 @@ ok "Bundle manifest written"
 echo ""
 echo -e "${GREEN}======================================================"
 echo "  Bundle complete! Contents:"
-du -sh "$BUNDLE"/images "$BUNDLE"/wheels "$BUNDLE"/repos "$BUNDLE"/ollama-models 2>/dev/null || true
+du -sh "$BUNDLE"/images "$BUNDLE"/wheels "$BUNDLE"/repos 2>/dev/null || true
 echo -e "======================================================${NC}"
 echo ""
 echo "To restore on an air-gapped machine:"

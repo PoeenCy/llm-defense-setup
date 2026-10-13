@@ -4,17 +4,18 @@
 
 **Single-machine situational-awareness stack for Attack-Defense CTF competitions.**
 
-Edge mitigation, deterministic flag-exfiltration detection, LLM-assisted IOC analysis,
-and SLA watchdogs — all driven from one config file.
+Edge mitigation, deterministic flag-exfiltration detection, and SLA watchdogs — all driven
+from one config file. No LLM/generative-AI path exists in this repo (removed — see
+`docs/STATUS.md`); the optional `ml-fingerprint` classifier (sklearn, non-generative) is the
+only model-adjacent component, and it's off by default.
 
 [![Python](https://img.shields.io/badge/python-3.11-blue)](https://www.python.org/)
 [![Docker Compose](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
-[![Ollama](https://img.shields.io/badge/LLM-Foundation--Sec--8B-orange)](https://huggingface.co/fdtn-ai/Foundation-Sec-8B)
 
 **→ [START.md](START.md) — khởi chạy lần đầu, bắt đầu ở đây.**  
 **→ [CONFIG.md](CONFIG.md) — need to change a port/IP/config RIGHT NOW mid-competition? Start there, not here.**
 
-[Architecture](docs/ARCHITECTURE.md) · [Runbook](docs/RUNBOOK.md) · [Config schema](docs/SCHEMA.md) · [Verified status](docs/STATUS.md) · [Demo script](docs/DEMO.md) · [Run the LLM on a separate machine](docs/REMOTE_LLM.md) · [Go live on competition day](docs/GOLIVE.md)
+[Architecture](docs/ARCHITECTURE.md) · [Runbook](docs/RUNBOOK.md) · [Config schema](docs/SCHEMA.md) · [Verified status](docs/STATUS.md) · [Demo script](docs/DEMO.md) · [Go live on competition day](docs/GOLIVE.md)
 
 </div>
 
@@ -29,7 +30,6 @@ one machine:
 
 - **Block** known attack patterns at the edge before they reach your service.
 - **Know immediately** when a flag leaves your network outbound.
-- **Ask an LLM** what technique an attacker used, grounded in the real captured flow.
 - **Get paged** the moment a service — or the edge proxy itself — goes down.
 
 It's a monitoring hub, not a CTF platform: it doesn't run your vulnerable services for you

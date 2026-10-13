@@ -3,5 +3,5 @@
 # in health_check.py (shared with the Dashboard's "System Status" panel, so
 # the CLI and the web UI always agree on what "healthy" means).
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")/contest-runtime"
 exec python3 health_check.py "$@"

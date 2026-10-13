@@ -18,8 +18,7 @@
 | `gameserver_hint` | object | no | Optional gameserver IP hint |
 | `honeytoken` | object | **yes** | Decoy flag config for trap detection |
 | `tulip` | object | **yes** | Tulip service port config |
-| `ollama` | object | **yes** | LLM / embedding model config |
-| `anythingllm` | object | **yes** | AnythingLLM RAG server config |
+| `ml_classifier` | object | **yes** | Compliance gate for the optional ml-fingerprint classifier |
 | `services` | array | **yes** | List of vulnbox services to monitor |
 
 ---
@@ -88,28 +87,21 @@
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `web_port` | integer | **yes** | Tulip web UI port |
-| `mongo_port` | integer | **yes** | MongoDB port (internal) |
 | `ingestor_port` | integer | **yes** | Tulip ingestor API port |
+| `note` | string | no | Tulip stores flows in TimescaleDB/Postgres, not Mongo — there is no `mongo_port` field |
 
 ---
 
-## `ollama` object
+## `ml_classifier` object
+
+Compliance gate for the optional `ml-fingerprint` service (`prep-only/ml-classifier/`), the
+only remaining non-generative model in this repo (sklearn DBSCAN clustering — see
+`docs/COMPLIANCE.md` for the full contest-day AI-quarantine story).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `port` | integer | **yes** | Ollama HTTP API port |
-| `llm_model` | string | **yes** | Ollama model tag for the LLM |
-| `embed_model` | string | **yes** | Ollama model tag for embeddings |
-| `gpu_layers` | integer | **yes** | Number of model layers to offload to GPU |
-| `note` | string | no | Usage reminder |
-
----
-
-## `anythingllm` object
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `port` | integer | **yes** | AnythingLLM web UI / API port |
+| `enabled` | boolean | **yes** | Default `false`. Has **no effect** when `MODE=contest` regardless of value — `bringup.sh` never merges `docker-compose.prep.yml` in contest mode, full stop. Only ever gates the service under `MODE=prep`, and only with BTC's written sign-off. |
+| `note` | string | no | Reminder of the above |
 
 ---
 
@@ -127,7 +119,22 @@ Each element:
 
 ---
 
+## `retention` object
+
+Disk-space guard run every 60s by `contest-runtime/hostagent/retention.py`. Three escalating
+tiers: (1) delete old captured pcaps, (2) prune Docker's own dangling images/build-cache (always
+safe — never touches anything running), (3) opt-in only — drop old Tulip flow data.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `pcap_keep_minutes` | integer | no | Delete pcaps older than this once detection has scanned them; `0` (default) = off |
+| `pcap_max_gb` | number | no | Keep `traffic/` under this size, oldest files first (default `5`) |
+| `min_free_gb` | number | no | Keep at least this much disk free; triggers pcap deletion, then Docker pruning (default `10`) |
+| `tulip_flow_retention_hours` | number | no | **Last resort, opt-in only.** `0` (default) = never touch Tulip's own flow data. If disk is still below `min_free_gb` after pcap cleanup *and* Docker pruning, host_agent drops TimescaleDB chunks from Tulip's `flow`/`flow_item` tables older than this many hours. This deletes real captured contest flows — leave at `0` unless you understand that tradeoff. |
+
+---
+
 ## Validation
 
-Run `./validate-config.sh` after every edit to `services.json`.  
+Run `contest-runtime/config/validate-config.sh` after every edit to `services.json`.
 It will `exit 1` loudly on any missing required field or type mismatch.

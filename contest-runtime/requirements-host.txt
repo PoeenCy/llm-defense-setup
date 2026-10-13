@@ -1,0 +1,5 @@
+# Python packages needed on the HOST (not in a container) for
+# contest-runtime/host_agent.py and contest-runtime/health_check.py.
+# Install with: pip3 install --user -r contest-runtime/requirements-host.txt
+# deploy-all.sh checks for this automatically and installs it if missing.
+redis>=5.0.0

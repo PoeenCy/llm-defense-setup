@@ -1,0 +1,71 @@
+version: "3.8"
+
+# CTF Monitor Hub — PREP-MODE OVERLAY compose file.
+#
+# NEVER started when MODE=contest. bringup.sh only adds `-f` for this file
+# when MODE=prep, and refuses (dies) if MODE=contest and this file's
+# containers are found running. See docs/INVENTORY.md for why each service
+# below is quarantined here rather than in docker-compose.contest.yml:
+#   - ml-fingerprint: sklearn ML classifier — ALSO gated by the separate
+#     ml_classifier.enabled flag in services.json (default false); being in
+#     this file is necessary but not sufficient for it to start, and being in
+#     MODE=prep is necessary but not sufficient either — see bringup.sh.
+#   - mock-vulnbox: rehearsal-only toy target, not real defense.
+#
+# No LLM/generative-AI path exists anywhere in this repo anymore (ioc-brain,
+# mcp-tulip, anythingllm, llm-host were removed per the user's explicit
+# decision — see docs/STATUS.md). This file is deliberately smaller than it
+# used to be; don't re-add an LLM service here without that decision being
+# revisited.
+#
+# Always run together with docker-compose.contest.yml (`-f contest -f prep`),
+# never alone — these services depend on ctf-net/redis defined there.
+
+services:
+
+  # ============================================================
+  # Mock vulnbox — rehearsal-only stand-in for a real vulnbox target.
+  # Reachable by ctf_proxy via Docker DNS (hostname "mock-vulnbox").
+  # ============================================================
+  mock-vulnbox:
+    build:
+      context: ./prep-only/training/mock-vulnbox
+      dockerfile: Dockerfile
+    container_name: ctf-mock-vulnbox
+    restart: unless-stopped
+    environment:
+      - MODE=${MODE:-contest}
+      - SVC1_PORT=9001
+      - SVC2_PORT=9002
+    networks:
+      - ctf-net
+
+  # ============================================================
+  # ML Fingerprint service — L3/L4 bot-deviation clustering (sklearn DBSCAN).
+  # Default OFF even in MODE=prep — see services.json ml_classifier.enabled.
+  # ============================================================
+  ml-fingerprint:
+    build:
+      context: ./prep-only/ml-classifier
+      dockerfile: Dockerfile
+    container_name: ctf-ml-fingerprint
+    restart: unless-stopped
+    environment:
+      - MODE=${MODE:-contest}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TRAFFIC_DIR=/traffic
+      - MONITOR_IP=${MONITOR_IP}
+      - VULNBOX_IP=${VULNBOX_IP}
+      - ML_SOURCE_CIDR=${ML_SOURCE_CIDR:-}
+    volumes:
+      - ./traffic:/traffic:ro
+      - ./contest-runtime/config/services.json:/app/services.json:ro
+    networks:
+      - ctf-net
+
+# No networks: block here on purpose — ctf-net is already declared in
+# docker-compose.contest.yml, and this file is never used without it
+# (`docker compose -f docker-compose.contest.yml -f docker-compose.prep.yml
+# ...`), so redeclaring it here would conflict (compose rejects a network
+# declared both inline and external across merged files).

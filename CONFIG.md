@@ -1,9 +1,12 @@
 # Tra nhanh lúc đang thi
 
-**Bật mọi thứ:** `bash deploy-all.sh` (chạy lại bao nhiêu lần cũng an toàn).
+**Bật mọi thứ:** `MODE=contest bash deploy-all.sh` (chạy lại bao nhiêu lần cũng an toàn).
 **Mọi việc còn lại làm trong Dashboard:** http://localhost:8080 — 7 tab: **MONITOR · EVENTS · HUNT · RULES · APPLIED · SERVICES · CONFIG**.
 **Hướng dẫn dùng Dashboard đầy đủ:** `docs/DASHBOARD_GUIDE.md`.
 Dashboard hỏng hẳn? Xem mục cuối ("Không mở được Dashboard").
+
+> Repo này **không còn tính năng LLM/AI nào** (đã bỏ hẳn — xem `docs/STATUS.md`). Mọi thứ dưới
+> đây chạy thuần rule-based (Suricata, ctf_proxy, regex), không có bước nào cần GPU/model.
 
 ---
 
@@ -36,19 +39,19 @@ Dashboard hỏng hẳn? Xem mục cuối ("Không mở được Dashboard").
 | Không có traffic mới | Tab SERVICES → *Traffic capture* → **Start**. Vẫn không được → vulnbox mất kết nối (xem bảng dưới) |
 | BTC đổi IP / port vulnbox | Tab CONFIG → Quick edit *Vulnbox IP* / *Service public port* → **Validate** → **Save & apply** |
 | Đổi flag regex / URL nộp flag | Tab CONFIG → *Flag regex* / *Flag submit URL*. Token nộp flag **không** nằm trong config (xem `team-tokens.txt`) |
-| Bật / tắt chặn thật (ctf_proxy) | Tab CONFIG → *ctf_proxy mode*: `disabled` (chỉ giám sát) hoặc `docker-compose` + 4 trường *Target ...*, rồi chạy `bash deploy-all.sh` |
-| Lỡ sửa config hỏng | Tab CONFIG → **Rollback** (mỗi lần lưu đều có backup trong `config-backups/`) |
+| Bật / tắt chặn thật (ctf_proxy) | Tab CONFIG → *ctf_proxy mode*: `disabled` (chỉ giám sát) hoặc `docker-compose` + 4 trường *Target ...*, rồi chạy `MODE=contest bash deploy-all.sh` |
+| Lỡ sửa config hỏng | Tab CONFIG → **Rollback** (mỗi lần lưu đều có backup trong `contest-runtime/config-backups/`) |
 | Muốn đọc log thuần text | EVENTS → **Open as .log**, hoặc `curl -s localhost:8080/api/events.log \| less` |
-| Muốn hỏi LLM | **Ask LLM** trên từng sự kiện / flow. Chỉ để tham khảo — nó có thể sai (vd. gán sai mã MITRE) |
 | Đồng đội muốn xem Dashboard từ máy khác | Tab CONFIG → *Dashboard bind IP* = IP LAN của máy này. **Chỉ làm trong mạng tin cậy** — các cổng này không có mật khẩu |
 
 ---
 
 ## Bảo mật cổng (đã khoá sẵn)
 
-Máy này nằm **trong VPN thi đấu**. Mọi cổng điều khiển (Dashboard 8080, Redis 6380, Tulip 3000, Postgres 5433,
-LLM 5001, ...) chỉ nghe `127.0.0.1`. Chỉ cổng **9999** mở ra ngoài, và chỉ nhận đúng 2 thứ từ vulnbox:
-báo honeytoken và báo cáo OS-watchdog. Các API quản trị của detection nằm ở `127.0.0.1:9998`.
+Máy này nằm **trong VPN thi đấu**. Mọi cổng điều khiển (Dashboard 8080, Redis 6380, Tulip 3000,
+Postgres 5433, ...) chỉ nghe `127.0.0.1`. Chỉ cổng **9999** mở ra ngoài, và chỉ nhận đúng 2 thứ từ
+vulnbox: báo honeytoken và báo cáo OS-watchdog. Các API quản trị của detection nằm ở
+`127.0.0.1:9998`.
 
 ---
 
@@ -59,19 +62,24 @@ báo honeytoken và báo cáo OS-watchdog. Các API quản trị của detection
 | Không SSH được vào vulnbox-host (VM tắt) | Không có traffic mới, không chặn/sửa rule ctf_proxy được | Dashboard, Tulip, Suricata, Events, dữ liệu cũ |
 | SSH được nhưng không có `sudo`/root | Không bắt được packet (`tcpdump` cần root — giới hạn của OS) | Mọi thứ khác; pcap ai đó thả vào `traffic/` vẫn được xử lý |
 | `ctf_proxy` chưa cấu hình | Không chặn được | Tự lùi về chỉ giám sát |
-| Không có Ollama | Mất Ask LLM | Mọi thứ khác |
 
 ---
 
 ## Không mở được Dashboard
 
 ```bash
-bash health-check.sh                    # cái gì đang chết, kèm lệnh sửa
-docker logs ctf-dashboard --tail 50     # lỗi backend dashboard
-tail -50 .host-agent.log                # lỗi khi áp rule / điều khiển service / lưu config
-bash deploy-all.sh                      # bật lại tất cả
+bash health-check.sh                     # cái gì đang chết, kèm lệnh sửa
+docker logs ctf-dashboard --tail 50      # lỗi backend dashboard
+tail -50 .host-agent.log                 # lỗi khi áp rule / điều khiển service / lưu config
+MODE=contest bash deploy-all.sh          # bật lại tất cả
 ```
-Sửa config bằng tay khi không có Dashboard: sửa `services.json` → `bash validate-config.sh` → `bash deploy-all.sh`.
+Sửa config bằng tay khi không có Dashboard: sửa `contest-runtime/config/services.json` →
+`bash contest-runtime/config/validate-config.sh` → `MODE=contest bash deploy-all.sh`.
+
+**`deploy-all.sh` dừng ngay ở bước "Preflight checks"?** Đọc đúng dòng `[FAIL]` — nó ghi rõ thiếu
+gì (thiếu `docker`, `docker compose`, hoặc module Python `redis`). Script **tự thử cài `redis`**
+qua pip trước khi báo lỗi; nếu vẫn fail, xem `/tmp/pip-redis-install.log` rồi cài tay:
+`pip3 install --user redis`.
 
 ---
 
@@ -79,11 +87,11 @@ Sửa config bằng tay khi không có Dashboard: sửa `services.json` → `bas
 
 | File | Làm gì |
 |---|---|
-| `services.json` | Config duy nhất (sửa qua tab CONFIG, hoặc tay) |
-| `deploy-all.sh` | Bật mọi thứ |
-| `health-check.sh` / `health_check.py` | Tự chẩn đoán |
-| `host_agent.py` + `hostagent/` | Tiến trình nền trên host, thực hiện mọi thay đổi mà Dashboard yêu cầu (chỉ thao tác trong danh sách trắng `hostagent/actions/`, chỉ service trong `hostagent/registry.py`) |
-| `dashboard/` | Giao diện — bản đồ file theo từng tab: `dashboard/README.md` |
-| `bringup.sh` | Bật stack local, ghi `.env` (được `deploy-all.sh` gọi) |
-| `vulnbox-deploy/` | Capture và ctf_proxy trên vulnbox (được gọi tự động) |
+| `contest-runtime/config/services.json` | Config duy nhất (sửa qua tab CONFIG, hoặc tay) |
+| `deploy-all.sh` | Bật mọi thứ (preflight → bringup → capture/traps/ctf_proxy → health check) |
+| `bringup.sh` | Bật stack local (Tulip/detection/dashboard/watchdog), ghi `.env` (được `deploy-all.sh` gọi) |
+| `health-check.sh` / `contest-runtime/health_check.py` | Tự chẩn đoán |
+| `contest-runtime/host_agent.py` + `contest-runtime/hostagent/` | Tiến trình nền trên host, thực hiện mọi thay đổi mà Dashboard yêu cầu (chỉ thao tác trong danh sách trắng `hostagent/actions/`, chỉ service trong `hostagent/registry.py`) |
+| `contest-runtime/dashboard/` | Giao diện — bản đồ file theo từng tab: `contest-runtime/dashboard/README.md` |
+| `contest-runtime/monitor/`, `contest-runtime/detection/`, `contest-runtime/watchdog/`, `contest-runtime/defense/` | Script deploy lên vulnbox (capture, honeytoken, OS-watchdog, ctf_proxy — được gọi tự động bởi `deploy-all.sh`) |
 | `docs/RUNBOOK.md` | Giải thích sâu + toàn bộ troubleshooting |

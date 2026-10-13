@@ -1,54 +1,77 @@
 # CTF Monitor Hub — Operations Runbook
 
 > **Role:** Lead monitor machine for Attack-Defense CTF.  
-> **This box:** Ingests traffic, runs detection, produces IOCs, serves situational-awareness dashboard.  
-> **Hardware:** Parrot Linux, 16 GB RAM, RTX 3050 (4 GB VRAM).
+> **This box:** Ingests traffic, runs detection, serves the situational-awareness dashboard.  
+> **No LLM / generative-AI path exists in this repo** (removed — see `docs/STATUS.md`). The only
+> model-adjacent component is the optional `ml-fingerprint` classifier (sklearn, non-generative,
+> off by default) — see Item D's compliance notes in `docs/STATUS.md` if that matters for your
+> contest's rules.
 
 ---
 
 ## Quick-Start — the 1-click
 
 ```bash
-bash deploy-all.sh
+MODE=contest bash deploy-all.sh
 ```
-Runs, in order: config validation → local stack (Tulip/detection/dashboard/
-watchdog) → remote capture (auto-detects the external interface, no
-docker-bridge name needed) → ctf_proxy (only if `ctf_proxy.insertion` in
-`services.json` is filled in and every precondition re-verifies over SSH —
-otherwise skips cleanly and you stay in monitor-only mode) → a final
-`health-check.sh` report. **Safe to re-run any time** — every step is
-idempotent, nothing here deletes data.
+(`MODE=prep` instead for home/practice use — enables the optional `ml-fingerprint` classifier
+and `mock-vulnbox` rehearsal target if `services.json` turns them on. **Never use `MODE=prep` on
+contest day.**)
 
-If the vulnbox is unreachable, the local stack still comes up fine (steps 3-4
-log a clear warning and continue); you'll just have no live traffic until
-that's fixed. See `docs/RUNBOOK.md` → Troubleshooting → "Always start here"
-(`health-check.sh`) for diagnosing what's actually wrong.
+Runs, in order: **preflight** (docker/docker-compose/python3 present, the `redis` Python module
+importable — auto-installs it via pip if missing, and **fails loudly with the exact fix command**
+if it still can't, rather than letting `host_agent.py` crash silently later) → config validation
+→ local stack (Tulip/detection/dashboard/watchdog) → remote capture (auto-detects the external
+interface, no docker-bridge name needed) → ctf_proxy (only if `ctf_proxy.insertion` in
+`services.json` is filled in and every precondition re-verifies over SSH — otherwise skips
+cleanly and you stay in monitor-only mode) → a final `health-check.sh` report. **Safe to re-run
+any time** — every step is idempotent, nothing here deletes data.
+
+If the vulnbox is unreachable, the local stack still comes up fine (steps 4-5 log a clear
+warning and continue); you'll just have no live traffic until that's fixed. See this file's
+Troubleshooting → "Always start here" (`health-check.sh`) for diagnosing what's actually wrong.
 
 ### First-time setup (before you can run deploy-all.sh at all)
 
+This part cannot be automated away — the values below are specific to your team and your
+contest's network, and only a human can enter them correctly. Everything AFTER this step is
+scripted and self-checking.
+
 ```bash
-# 1. Edit the central config
-nano services.json          # set vulnbox IP, flag regex, service ports
+# 1. Edit the central config — this is the ONLY file you hand-edit
+nano contest-runtime/config/services.json
+#   Must fill in at minimum: team_id, vulnbox.ip, monitor_host.ip, flag.regex,
+#   teams_cidr, services[] (your real service ports). See docs/SCHEMA.md for
+#   every field, and docs/GOLIVE.md for the organizer-handoff checklist.
 
-# 2. Validate config
-bash validate-config.sh
+# 2. Validate config — catches typos/missing fields BEFORE anything else runs
+bash contest-runtime/config/validate-config.sh
+#   Any [FAIL] line here must be fixed before continuing — nothing downstream
+#   will work right with an invalid config, and later steps will say so too.
 
-# 3. Bundle everything for offline use
-bash pull-and-save.sh       # ~20-40 min, downloads ~15-25 GB
+# 3. (while you still have internet) Bundle everything for offline use
+bash pull-and-save.sh       # ~10-20 min, downloads several GB of images/wheels/repos
 ```
 
 ### Air-gapped machine, competition day
 
 ```bash
-# 1. Copy offline-bundle/ from prep machine (USB/LAN transfer)
+# 1. Copy offline-bundle/ from the prep machine (USB/LAN transfer)
 rsync -a offline-bundle/ /path/to/Setup_tool/offline-bundle/
 
-# 2. Restore from bundle (zero network calls)
+# 2. Restore from bundle (zero network calls) — prints [FATAL] and stops if
+#    offline-bundle/ is missing or incomplete, rather than half-restoring
 bash offline-restore.sh
 
 # 3. 1-click bring-up
-bash deploy-all.sh
+MODE=contest bash deploy-all.sh
 ```
+
+**If something in steps 1-3 fails:** every script in this repo (`validate-config.sh`,
+`bringup.sh`, `offline-restore.sh`, `deploy-all.sh`) prints a `[FATAL]`/`[FAIL]` line and a
+non-zero exit code on real problems — it does not continue silently into a half-working state.
+If you see a plain Python traceback instead of one of those, that's itself a bug worth reporting,
+not something to work around by re-running blindly.
 
 ---
 
@@ -74,13 +97,9 @@ bash deploy-all.sh
                     │     │             │                       │
                     │  ┌──▼──┐      ┌──▼──────────────────┐   │
                     │  │ML FP│      │  Dashboard (Item 8)  │   │
-                    │  │hints│      │  WebSocket → browser │   │
-                    │  └─────┘      └─────────────────────┘    │
-                    │                                           │
-                    │  IOC Brain (load on demand, Item 6)       │
-                    │  Foundation-Sec-8B Q4 + Ollama            │
-                    │  AnythingLLM (RAG over vault/)            │
-                    │                                           │
+                    │  │prep-│      │  WebSocket → browser │   │
+                    │  │only │      └─────────────────────┘    │
+                    │  └─────┘                                 │
                     │  Watchdog (SLA poller, Item 7)            │
                     └─────────────────────────────────────────┘
 ```
@@ -93,13 +112,14 @@ bash deploy-all.sh
 |---------|------|-------------|
 | Dashboard | 8080 | Unified monitoring UI |
 | Tulip UI | 3000 | Flow inspection |
-| IOC Brain API | 5001 | LLM analysis endpoint |
-| AnythingLLM | 3001 | RAG Q&A over vault/ |
 | Detection/Honeytoken | 9999 | Alert collector + honeytoken |
 | Redis | 6380 | Shared alert queue |
-| Ollama | 11434 | LLM API (load on demand) |
+
+`MODE=prep` only (never on contest day): `mock-vulnbox` (toy target) and `ml-fingerprint`
+(bot-deviation hints over Redis, no published port) — both off by default, see `services.json`.
 
 ---
+
 
 ## Bring-Up Order
 
@@ -109,43 +129,41 @@ Services **must** start in this order (handled by `bringup.sh`):
 2. **Tulip stack** — traffic ingestion + TimescaleDB
 3. **Detection service** — flag-out scanner, honeytoken collector
 4. **Watchdog** — SLA poller
-5. **ML Fingerprint** — bot fingerprinter (warmup: 3 ticks)
-6. **IOC Brain** — load-on-demand LLM
-7. **Dashboard** — unified UI
-8. **AnythingLLM** — RAG (optional, loads last)
-9. **Ollama** — serve LLM on demand
+5. **Dashboard** — unified UI
+6. *(`MODE=prep` only)* **ML Fingerprint** — bot fingerprinter (warmup: 3 ticks), if
+   `services.json`'s `ml_classifier.enabled` is true
+7. *(`MODE=prep` only)* **mock-vulnbox** — rehearsal target, if `mock_vulnbox.enabled` is true
 
 ---
 
+
 ## Offline Restore Procedure
 
-> Use on clean, air-gapped machine. Must have `offline-bundle/` transferred.
+> Use on a clean, air-gapped machine. Must have `offline-bundle/` transferred first.
 
 ```bash
 # Prerequisites
-which docker && docker --version    # Docker 24+
-which python3                        # Python 3.11+
-which ollama                         # Ollama 0.2+
+which docker && docker compose version   # Docker 24+ with the compose v2 plugin
+which python3                             # Python 3.11+
+python3 -c "import redis" || pip3 install --user redis   # host_agent.py needs this
 
-# Step 1: Load Docker images
+# Step 1: Load Docker images (fails loudly if offline-bundle/ is missing/incomplete)
 bash offline-restore.sh
 
 # Step 2: Verify
 docker images | grep tulip           # should show tulip-* images
 docker images | grep redis           # should show redis:7-alpine
-ollama list                          # should show Foundation-Sec-8B and nomic-embed-text
 
 # Step 3: Bring up
-bash bringup.sh --offline
+MODE=contest bash bringup.sh --offline
 ```
 
 ### Verifying air-gap compliance
 
 ```bash
-# All of these should FAIL (timeout/refused) on air-gapped machine:
+# All of these should FAIL (timeout/refused) on an air-gapped machine:
 curl --connect-timeout 3 https://docker.io
 curl --connect-timeout 3 https://pypi.org
-curl --connect-timeout 3 https://ollama.ai
 ```
 
 ---
@@ -168,18 +186,7 @@ curl -X POST http://localhost:9999/honeytoken
 # Expect: alert type=honeytoken appears on dashboard
 ```
 
-### Test 3: IOC analysis
-
-```bash
-# Analyze a flow snippet
-curl -s -X POST http://localhost:5001/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"log_snippet": "POST /login HTTP/1.1\nHost: 10.0.0.2:9001\nAuthorization: Basic YWRtaW46QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQQ=\n\n{\"password\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}"}' \
-  | python3 -m json.tool
-# Expect: structured IOC JSON with attacker_ip, technique, mitre_attack fields
-```
-
-### Test 4: SLA watchdog fires in <5s
+### Test 3: SLA watchdog fires in <5s
 
 ```bash
 # Stop a mock service (e.g. block port with iptables)
@@ -190,14 +197,15 @@ curl http://localhost:8080/api/alerts | python3 -m json.tool | grep sla-down
 sudo iptables -D INPUT -p tcp --dport 9001 -j REJECT
 ```
 
-### Test 5: Dashboard shows all three signal types
+### Test 4: Dashboard shows all signal types
 
-1. Run tests 1, 2, 4 above
+1. Run tests 1, 2, 3 above
 2. Open `http://localhost:8080`
 3. Verify: flag-out (red), honeytoken (red), sla-down (red) all visible
-4. Verify priority order: flag-out/honeytoken at top, ML hints at bottom
+4. Verify priority order: flag-out/honeytoken at top, ML hints at bottom (`MODE=prep` only)
 
 ---
+
 
 ## Deploying Vulnbox-Side Components
 
@@ -220,7 +228,7 @@ until this succeeds.
 ### Step 1 — start capture + pull loop (one script, idempotent)
 
 ```bash
-bash vulnbox-deploy/deploy-capture-pull.sh
+bash contest-runtime/monitor/deploy-capture-pull.sh
 ```
 This SSHes in, starts `tcpdump -Z root -i <docker_bridge> -w ... -G 30` on the
 vulnbox-host (writing 30s-rotated pcap files to `/tmp/ctf-capture-<pid>/` —
@@ -240,8 +248,8 @@ monitoring/capture.
 ### Step 3 — OS watchdog / honeytoken (same pattern as before, if you have root on the vulnbox)
 
 ```bash
-bash vulnbox-deploy/deploy-os-watchdog.sh
-bash vulnbox-deploy/deploy-honeytoken.sh
+bash contest-runtime/watchdog/deploy-os-watchdog.sh
+bash contest-runtime/detection/deploy-honeytoken.sh
 ```
 
 ### Verify capture is actually producing usable data
@@ -265,7 +273,7 @@ docker exec tulip-timescale-1 psql 'postgres://tulip@timescale:5432/tulip' \
 > **It WILL cause a few seconds of downtime** when the port binding flips over —
 > confirm this is an acceptable risk window before doing it during a scored round.
 
-This is now config-driven and automated (`vulnbox-deploy/deploy-ctfproxy.sh`,
+This is now config-driven and automated (`contest-runtime/defense/deploy-ctfproxy.sh`,
 called by `deploy-all.sh`), because the only safe way to insert a proxy in
 front of a *live* service is to know exactly which compose file/service/network
 it lives in. Guessing at an unfamiliar layout risks a bad edit to a real
@@ -294,7 +302,7 @@ named `<project>_<network-key-in-that-compose-file>`).
 ### What it actually does (same steps whether you run it by hand or let the script)
 
 ```bash
-bash vulnbox-deploy/deploy-ctfproxy.sh
+bash contest-runtime/defense/deploy-ctfproxy.sh
 ```
 1. Verifies: SSH reachable, compose file exists, the named service is defined
    in it, that service actually publishes the target port, the named network
@@ -329,57 +337,29 @@ there (see the Tulip/Dashboard workflow a few sections up). Don't assume
 
 ---
 
-## IOC Brain — LLM Usage
+## ML Bot Fingerprinter — Notes (`MODE=prep` only, off by default)
 
-The LLM is **never** kept resident in RAM. It loads on each request and is released after.
-
-```bash
-# Analyze a Tulip flow by ID
-curl -X POST http://localhost:5001/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"flow_id": "<tulip-flow-id>"}'
-
-# Analyze raw log snippet
-curl -X POST http://localhost:5001/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"log_snippet": "paste raw traffic or log here"}'
-
-# Test MongoDB is read-only
-curl http://localhost:5001/mongo/test
-# Expect: write_rejected=true
-```
-
-**Latency on RTX 3050 (4 GB VRAM, Q4_K_M 8B, gpu_layers=20):**
-
-| First call (cold) | Subsequent calls | GPU memory |
-|-------------------|-----------------|------------|
-| ~15-25s           | ~8-15s          | ~2.5 GB    |
-
-> Latency measured at match start and recorded here. Update with real figures.
-
----
-
-## ML Bot Fingerprinter — Notes
-
-> **⚠️ HINT LAYER ONLY. Not an alarm. Human decision required before action.**
+> **⚠️ HINT LAYER ONLY. Not an alarm. Human decision required before action.** Not generative
+> AI — sklearn DBSCAN clustering. Gated by `services.json`'s `ml_classifier.enabled` (default
+> `false`) AND `MODE=prep`; has no effect at all under `MODE=contest` regardless of the flag.
 
 - Fingerprints by: inter-arrival time cadence, packet size distribution, TCP handshake order, per-tick flow count
 - **Does NOT fingerprint by IP alone** — organizer may NAT all checker traffic
 - After 3 tick windows (~6 min): starts labeling deviants from checker cluster
 - Labels: `bot-like` (matches checker pattern) vs `deviant` (anomalous cadence/sizes)
 - Deviant flows appear in Dashboard → "ML Bot Hints" panel (purple)
-- DBSCAN parameters: eps=1.5, min_samples=3 (tune in `ml-fingerprint/fingerprint_service.py`)
+- DBSCAN parameters: eps=1.5, min_samples=3 (tune in `prep-only/ml-classifier/fingerprint_service.py`)
 
 ---
 
 ## Changing Configuration
 
-**Edit only `services.json`.** Then:
+**Edit only `contest-runtime/config/services.json`.** Then:
 
 ```bash
-bash validate-config.sh
-bash teardown.sh
-bash bringup.sh
+bash contest-runtime/config/validate-config.sh
+MODE=contest bash teardown.sh
+MODE=contest bash bringup.sh
 ```
 
 All components re-read from services.json on next start. Nothing else needs editing.
@@ -388,70 +368,71 @@ All components re-read from services.json on next start. Nothing else needs edit
 
 ## Updating Suricata Rules
 
-Suricata rules live in `suricata/rules/`. Add `.rules` files there:
+Suricata rules live in `contest-runtime/detection/suricata/lib/rules/`. Add `.rules` files there:
 
 ```bash
 # Example: add a flag-out rule
-cat >> suricata/rules/ctf-flagout.rules << 'EOF'
+cat >> contest-runtime/detection/suricata/lib/rules/ctf-flagout.rules << 'EOF'
 alert tcp any any -> any any (msg:"CTF Flag Exfiltration"; pcre:"/[A-Z0-9]{31}=/"; sid:9000001; rev:1;)
 EOF
 
 # Reload Suricata (if using Tulip's Suricata container)
-docker exec tulip-suricata suricatasc -c reload-rules
+docker exec tulip-suricata-1 suricatasc -c reload-rules
 ```
 
 ---
+
 
 ## File Structure
 
 ```
 Setup_tool/
-├── services.json              ← EDIT THIS (single source of truth)
-├── docker-compose.yml         ← Monitor hub services
-├── bringup.sh                 ← One-command start (generators → services)
-├── teardown.sh                ← Graceful stop
-├── validate-config.sh         ← Config validator (incl. keyword drift check)
-├── pull-and-save.sh           ← Build offline bundle
-├── offline-restore.sh         ← Restore on air-gapped machine
+├── contest-runtime/              ← everything allowed to run during the 8h contest
+│   ├── config/
+│   │   ├── services.json         ← EDIT THIS (single source of truth)
+│   │   ├── validate-config.sh    ← config validator (incl. keyword drift check)
+│   │   └── generators/           ← emit each tool's native config from services.json
+│   │       ├── gen-tulip-env.py  ← → offline-bundle/repos/tulip/.env
+│   │       └── gen-ctfproxy.py   ← → offline-bundle/repos/ctf_proxy/proxy/config/config.json
+│   ├── detection/                ← flag-out regex scanner, honeytoken, Suricata ruleset
+│   ├── watchdog/                 ← SLA poller + OS-watchdog deploy scripts
+│   ├── monitor/                  ← vulnbox capture deploy scripts
+│   ├── defense/                  ← ctf_proxy deploy script + rule templates
+│   ├── dashboard/                ← unified monitoring UI
+│   ├── hostagent/ + host_agent.py ← host-side action executor for the Dashboard
+│   └── health_check.py           ← one-shot diagnostic (also feeds Dashboard's System Status)
 │
-├── docs/                      ← Everything besides this file
-│   ├── SCHEMA.md              ← services.json field reference
-│   ├── ARCHITECTURE.md        ← How the system works, data-flow first
-│   ├── RUNBOOK.md             ← This file
-│   ├── STATUS.md              ← What's actually verified to work, with evidence
-│   └── DEMO.md                ← Live-presentation script (pre-flight checks, fallbacks)
+├── prep-only/                    ← NEVER started when MODE=contest
+│   ├── ml-classifier/            ← optional sklearn bot-deviation classifier (off by default)
+│   └── training/mock-vulnbox/    ← toy vulnerable services, rehearsal only
 │
-├── generators/                ← Emit each tool's native config from services.json
-│   ├── gen-tulip-env.py       ← → offline-bundle/repos/tulip/.env
-│   └── gen-ctfproxy.py        ← → offline-bundle/repos/ctf_proxy/proxy/config/config.json
+├── docker-compose.contest.yml    ← the ONLY compose file MODE=contest ever touches
+├── docker-compose.prep.yml       ← MODE=prep overlay (mock-vulnbox, ml-fingerprint)
+├── bringup.sh                    ← one-command start (MODE=contest|prep required)
+├── teardown.sh                   ← graceful stop (always tears down both compose files)
+├── deploy-all.sh                 ← 1-click: preflight → bringup → vulnbox capture/traps/ctf_proxy
+├── pull-and-save.sh              ← build offline bundle (run with internet, before the contest)
+├── offline-restore.sh            ← restore on an air-gapped machine (zero network calls)
 │
-├── detection/                 ← Flag-out regex scanner + honeytoken + Suricata ingester
-├── ml-fingerprint/            ← L3/L4 bot fingerprinter (DBSCAN)
-├── watchdog/                  ← SLA poller
-├── ioc-brain/                 ← Load-on-demand LLM API (reads flows via mcp-tulip)
-├── mcp-tulip/                 ← MCP server: read-only Postgres access to Tulip's flow DB
-├── mock-vulnbox/              ← Toy vulnerable services for single-machine testing
-├── dashboard/                 ← Unified monitoring UI
+├── docs/                         ← everything besides this file
+│   ├── SCHEMA.md                 ← services.json field reference
+│   ├── ARCHITECTURE.md           ← how the system works, data-flow first
+│   ├── RUNBOOK.md                ← this file
+│   ├── STATUS.md                 ← what's actually verified to work, with evidence
+│   ├── GOLIVE.md                 ← organizer-handoff / contest-day transition checklist
+│   └── DEMO.md                   ← live-presentation script (pre-flight checks, fallbacks)
 │
-├── suricata/lib/rules/        ← Suricata ruleset (starter — swap in a real feed before competition)
-├── traffic/                   ← Pcap files (Tulip + detection both watch this dir)
-├── vault/                     ← Documents for AnythingLLM RAG (currently empty)
+├── traffic/                      ← pcap files (Tulip + detection both watch this dir)
 │
-├── vulnbox-deploy/            ← Deploy scripts for a REAL vulnbox (NOT auto-run)
-│   ├── deploy-capture-pull.sh  ← actual capture method used: SSH + tcpdump + rsync pull loop
-│   ├── deploy-os-watchdog.sh
-│   ├── deploy-honeytoken.sh
-│   └── os-watchdog-agent.sh
-│
-└── offline-bundle/            ← Build artifact (gitignored — run pull-and-save.sh to create)
-    ├── images/                ← Docker .tar archives
-    ├── wheels/                ← Python .whl files
-    ├── repos/                 ← Cloned upstream: tulip, ctf_proxy, pcap-broker
-    ├── ollama-models/         ← LLM + embedding model blobs
-    └── services.json          ← Config snapshot
+└── offline-bundle/               ← build artifact (gitignored — run pull-and-save.sh to create)
+    ├── images/                   ← Docker .tar archives
+    ├── wheels/                   ← Python .whl files
+    ├── repos/                    ← cloned upstream: tulip, ctf_proxy, pcap-broker
+    └── services.json             ← config snapshot
 ```
 
 ---
+
 
 ## Troubleshooting
 
@@ -462,22 +443,21 @@ bash health-check.sh
 ```
 One-shot, read-only diagnostic covering every failure mode we've actually hit
 in practice (disk space, container status, vulnbox SSH reachability, pull
-loop, Tulip flow freshness, Ollama). Each line names the exact fix command.
-Run this BEFORE trying to debug anything by hand — most incidents below were
-things this script would have caught in 10 seconds instead of a long manual
+loop, Tulip flow freshness). Each line names the exact fix command. Run this
+BEFORE trying to debug anything by hand — most incidents below were things
+this script would have caught in 10 seconds instead of a long manual
 investigation.
 
 ### Quick table
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| Dashboard blank | WebSocket connection failed | Check Redis is up: `docker compose ps redis` |
-| No Tulip flows at all | Pull loop not running / vulnbox unreachable | `ssh dfcd-vbox "echo OK"` first, then `bash vulnbox-deploy/deploy-capture-pull.sh` |
-| `ssh dfcd-vbox` times out at banner exchange | Azure VM(s) stopped/deallocated | Start them from Azure portal/CLI — not fixable from this machine |
+| Dashboard blank | WebSocket connection failed | Check Redis is up: `docker compose -f docker-compose.contest.yml ps redis` |
+| No Tulip flows at all | Pull loop not running / vulnbox unreachable | `ssh dfcd-vbox "echo OK"` first, then `bash contest-runtime/monitor/deploy-capture-pull.sh` |
+| `ssh dfcd-vbox` times out at banner exchange | Remote VM(s) stopped/deallocated | Start them from your cloud portal/CLI — not fixable from this machine |
 | Flows exist but count stuck, old timestamp only | Pull loop silently died (e.g. Monitor watch expired) | Check `ps aux \| grep rsync`; restart the pull loop |
-| IOC Brain 503 | Ollama not running | `systemctl status ollama` (it's a systemd service, not a container — should survive reboots on its own; `systemctl start ollama` if not) |
-| LLM model missing | Model not pulled | `ollama pull <model-name>` |
-| Watchdog shows unknown | Can't reach vulnbox | Check vulnbox IP in services.json |
+| Watchdog shows unknown | Can't reach vulnbox | Check vulnbox IP in `contest-runtime/config/services.json` |
+| `deploy-all.sh` dies at "Preflight checks" | Missing docker/docker-compose/python3, or `redis` python module won't install | Read the `[FAIL]` line — it names the exact missing thing. For `redis`, check `/tmp/pip-redis-install.log` |
 
 ### Real incidents hit in practice — full root cause (so you don't need to re-debug from scratch)
 
@@ -500,7 +480,7 @@ investigation.
   created by that dropped-privilege user and often can't be written.
 - Fix: always launch with `sudo tcpdump -Z root ...` to keep root for every
   rotation, not just the first file. Already baked into
-  `vulnbox-deploy/deploy-capture-pull.sh` — if you ever hand-roll a tcpdump
+  `contest-runtime/monitor/deploy-capture-pull.sh` — if you ever hand-roll a tcpdump
   command instead of using that script, don't forget this flag.
 
 **3. Pulled pcap files process "0 packets" in Tulip despite having real traffic in them**
@@ -515,10 +495,10 @@ investigation.
 - Fix: add `"capture_port": 80` next to that service's `"port": 8003` entry in
   `services.json` (only needed when the capture point is downstream of a NAT —
   a traditional vulnbox capturing on a plain NIC doesn't need this).
-  `generators/gen-tulip-env.py` prefers `capture_port` over `port` for the BPF
+  `contest-runtime/config/generators/gen-tulip-env.py` prefers `capture_port` over `port` for the BPF
   string if present. After editing, re-run:
   ```bash
-  python3 generators/gen-tulip-env.py
+  python3 contest-runtime/config/generators/gen-tulip-env.py
   cd offline-bundle/repos/tulip && docker compose up -d assembler
   ```
 - Diagnose quickly which port the capture point actually sees:
@@ -541,7 +521,7 @@ investigation.
 **6. A container started by hand (`docker compose up -d <svc>`) crashes on empty config**
 - Cause: compose got its values from environment variables that only existed inside
   `bringup.sh`'s shell. Fixed: `bringup.sh` now writes them to `./.env`, which compose reads
-  automatically. If you see it again, re-run `bash bringup.sh` once to regenerate `.env`.
+  automatically. If you see it again, re-run `MODE=contest bash bringup.sh` once to regenerate `.env`.
 
 **7. Restricting an endpoint by client IP doesn't work on this machine**
 - Docker here is rootless podman: every inbound connection reaches the container from the
@@ -551,7 +531,7 @@ investigation.
 
 **8. Every control-plane port was listening on 0.0.0.0 (reachable from the competition VPN)**
 - Fixed: compose ports bind `${BIND_IP}` (services.json `monitor_host.bind_ip`, default
-  127.0.0.1). `generators/gen-tulip-env.py` re-applies the same to Tulip's upstream compose
+  127.0.0.1). `contest-runtime/config/generators/gen-tulip-env.py` re-applies the same to Tulip's upstream compose
   files on every run. Only port 9999 (honeytoken + OS-watchdog intake) is public.
   Check any time: `ss -ltn | grep -v 127.0.0.1`
 

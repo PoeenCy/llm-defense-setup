@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 # bringup.sh — CTF Monitor Hub: One-Command Bring-Up
-# Usage: bash bringup.sh [--offline]
+# Usage: MODE=contest|prep bash bringup.sh [--offline]
+#
+# There is no LLM / generative-AI path anywhere in this repo (removed per an
+# explicit decision — see docs/STATUS.md). The MODE split still matters
+# because `ml-fingerprint` (a non-generative sklearn classifier) and
+# `mock-vulnbox` (a rehearsal-only toy target) are still prep-only/practice
+# fixtures, not real contest-day defense.
+#
+# MODE=contest — ONLY docker-compose.contest.yml runs. Any already-running
+#                prep-only container is stopped before contest services
+#                start, and the whole run is refused if one is still found
+#                running afterward (assert_contest_clean, Step 6b).
+# MODE=prep    — docker-compose.contest.yml AND docker-compose.prep.yml both
+#                run (home/practice use: mock-vulnbox, and — only if
+#                services.json's ml_classifier.enabled is also true —
+#                ml-fingerprint).
 #
 # Steps:
 #   1. Validate services.json
@@ -8,14 +23,15 @@
 #   3. Generate Tulip .env from services.json
 #   4. Export all env vars for docker-compose
 #   5. Build/pull images if needed
-#   6. Start all services in correct dependency order
+#   6. Start all services in correct dependency order (mode-gated)
+#   6b. Assert no prep-only container is running when MODE=contest
 #   7. Health-check and report status
 #
-# Safety: read-only MongoDB. No auto-blocking. No auto-deploy.
+# Safety: read-only Postgres (Tulip). No auto-blocking. No auto-deploy.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG="$SCRIPT_DIR/services.json"
+CONFIG="$SCRIPT_DIR/contest-runtime/config/services.json"
 TULIP_DIR="$SCRIPT_DIR/offline-bundle/repos/tulip"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; NC='\033[0m'
@@ -29,12 +45,53 @@ header() { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 OFFLINE=false
 for arg in "$@"; do [[ "$arg" == "--offline" ]] && OFFLINE=true; done
 
+MODE="${MODE:-}"
+case "$MODE" in
+    contest|prep) ;;
+    "") die "MODE is not set. Run as: MODE=contest bash bringup.sh   (or MODE=prep for home/practice use)" ;;
+    *)  die "MODE must be 'contest' or 'prep', got: '$MODE'" ;;
+esac
+export MODE  # so docker-compose interpolates ${MODE} into every container's
+             # environment — the prep-only services re-check this themselves
+             # at startup (defense-in-depth beyond "which compose file ran")
+
+# Container names that must NEVER be running when MODE=contest. Kept here
+# (not sourced from docker-compose.prep.yml) so the check doesn't depend on
+# that file parsing correctly — a hard-coded denylist is the right failure
+# mode for a compliance gate.
+PREP_ONLY_CONTAINERS=(ctf-ml-fingerprint ctf-mock-vulnbox)
+
+assert_contest_clean() {
+    local offenders=()
+    for name in "${PREP_ONLY_CONTAINERS[@]}"; do
+        if docker ps --format '{{.Names}}' | grep -qx "$name"; then
+            offenders+=("$name")
+        fi
+    done
+    if [[ ${#offenders[@]} -gt 0 ]]; then
+        echo -e "${RED}[COMPLIANCE FAILURE]${NC} prep-only container(s) running while MODE=contest:"
+        printf '  - %s\n' "${offenders[@]}"
+        die "Refusing to proceed — stop these (docker stop ...) and re-run."
+    fi
+}
+
+COMPOSE_FILES=(-f docker-compose.contest.yml)
+if [[ "$MODE" == "prep" ]]; then
+    COMPOSE_FILES+=(-f docker-compose.prep.yml)
+fi
+
 echo ""
 echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${CYAN}║     CTF Monitor Hub — Bring-Up                      ║${NC}"
 echo -e "${BOLD}${CYAN}║     Attack-Defense CTF Situational Awareness Stack   ║${NC}"
 echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
+log "MODE=$MODE"
+if [[ "$MODE" == "contest" ]]; then
+    ok "Contest mode — only docker-compose.contest.yml will run."
+else
+    warn "Prep mode — mock-vulnbox and (if enabled) ml-fingerprint MAY start. Never use this mode on contest day."
+fi
 [[ "$OFFLINE" == true ]] && warn "OFFLINE MODE — no network calls will be made"
 
 # ═══════════════════════════════════════════════════════════════
@@ -42,8 +99,8 @@ echo ""
 # ═══════════════════════════════════════════════════════════════
 header "Step 0: Validate services.json"
 
-[[ -f "$CONFIG" ]] || die "services.json not found at $SCRIPT_DIR"
-bash "$SCRIPT_DIR/validate-config.sh" "$CONFIG" || die "services.json validation failed — fix errors above"
+[[ -f "$CONFIG" ]] || die "services.json not found at $CONFIG"
+bash "$SCRIPT_DIR/contest-runtime/config/validate-config.sh" "$CONFIG" || die "services.json validation failed — fix errors above"
 ok "services.json valid"
 
 # Parse all config values
@@ -53,23 +110,25 @@ VULNBOX_BROKER_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); pri
 MONITOR_IP=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['monitor_host']['ip'])")
 DASHBOARD_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['monitor_host']['dashboard_port'])")
 ALERT_QUEUE_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['monitor_host']['alert_queue_port'])")
-IOC_API_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['monitor_host']['ioc_api_port'])")
 FLAG_REGEX=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['flag']['regex'])")
 HONEYTOKEN_FLAG=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['honeytoken']['flag'])")
 HONEYTOKEN_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['honeytoken']['endpoint_port'])")
 TEAMS_CIDR=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['teams_cidr'])")
 TULIP_WEB_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['tulip']['web_port'])")
-OLLAMA_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['port'])")
-OLLAMA_HOST_CFG=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama'].get('host',''))")
 BIND_IP=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['monitor_host'].get('bind_ip','127.0.0.1'))")
 MOCK_VULNBOX_ENABLED=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(str(d.get('mock_vulnbox',{}).get('enabled',False)).lower())")
-LLM_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['llm_model'])")
-EMBED_MODEL=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['embed_model'])")
-GPU_LAYERS=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['ollama']['gpu_layers'])")
-ANYTHINGLLM_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['anythingllm']['port'])")
-MCP_PG_ROLE=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['mcp']['postgres_role'])")
-MCP_PG_DB=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['mcp']['postgres_db'])")
-MCP_PG_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['mcp']['postgres_host_port'])")
+ML_CLASSIFIER_ENABLED=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(str(d.get('ml_classifier',{}).get('enabled',False)).lower())")
+
+if [[ "$MODE" == "contest" ]]; then
+    header "Step 0b: Pre-clean — stop any leftover prep-only containers"
+    for name in "${PREP_ONLY_CONTAINERS[@]}"; do
+        if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+            warn "Stopping leftover prep-only container: $name"
+            docker rm -f "$name" >/dev/null 2>&1 || true
+        fi
+    done
+    ok "No prep-only containers will carry over into this contest run"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # 1. Offline restore (if requested)
@@ -88,10 +147,9 @@ header "Step 2: Prepare directories"
 
 mkdir -p \
     "$SCRIPT_DIR/traffic" \
-    "$SCRIPT_DIR/vault" \
-    "$SCRIPT_DIR/suricata/log" \
-    "$SCRIPT_DIR/suricata/etc" \
-    "$SCRIPT_DIR/suricata/lib"
+    "$SCRIPT_DIR/contest-runtime/detection/suricata/log" \
+    "$SCRIPT_DIR/contest-runtime/detection/suricata/etc" \
+    "$SCRIPT_DIR/contest-runtime/detection/suricata/lib"
 
 ok "Directories ready"
 
@@ -101,7 +159,7 @@ ok "Directories ready"
 header "Step 3: Generate Tulip config"
 
 if [[ -d "$TULIP_DIR" ]]; then
-    CONFIG="$CONFIG" TULIP_DIR="$TULIP_DIR" python3 "$SCRIPT_DIR/generators/gen-tulip-env.py"
+    CONFIG="$CONFIG" TULIP_DIR="$TULIP_DIR" python3 "$SCRIPT_DIR/contest-runtime/config/generators/gen-tulip-env.py"
     ok "Tulip .env generated"
 else
     warn "Tulip repo not found at $TULIP_DIR — skipping Tulip config"
@@ -110,7 +168,7 @@ fi
 
 CTF_PROXY_DIR="$SCRIPT_DIR/offline-bundle/repos/ctf_proxy"
 if [[ -d "$CTF_PROXY_DIR" ]]; then
-    CONFIG="$CONFIG" CTF_PROXY_DIR="$CTF_PROXY_DIR" python3 "$SCRIPT_DIR/generators/gen-ctfproxy.py"
+    CONFIG="$CONFIG" CTF_PROXY_DIR="$CTF_PROXY_DIR" python3 "$SCRIPT_DIR/contest-runtime/config/generators/gen-ctfproxy.py"
     ok "ctf_proxy config generated"
 else
     warn "ctf_proxy not found at $CTF_PROXY_DIR — skipping"
@@ -122,25 +180,9 @@ fi
 header "Step 4: Export environment"
 
 export TEAM_ID VULNBOX_IP MONITOR_IP TEAMS_CIDR
-export FLAG_REGEX HONEYTOKEN_FLAG HONEYTOKEN_PORT HONEYTOKEN_PORT
-export DASHBOARD_PORT ALERT_QUEUE_PORT IOC_API_PORT
+export FLAG_REGEX HONEYTOKEN_FLAG HONEYTOKEN_PORT
+export DASHBOARD_PORT ALERT_QUEUE_PORT
 export TULIP_WEB_PORT BIND_IP
-export OLLAMA_PORT LLM_MODEL EMBED_MODEL GPU_LAYERS
-export ANYTHINGLLM_PORT
-
-# On some hosts "docker" is actually backed by podman (check: docker info's
-# Server Version matches podman's numbering, not a docker-ce release). In that
-# case custom bridge networks don't NAT "host.docker.internal" back to the
-# host correctly, so services relying on it (ioc-brain, dashboard, anythingllm)
-# can't reach Ollama/Tulip/Mongo on the host. Detect this and fall back to the
-# classic docker0 bridge gateway, which does route correctly even under podman.
-# The actual gateway probe needs ctf-net to exist, so it happens in Step 6
-# below (right after `docker compose up -d` creates that network) — this
-# placeholder lets steps between here and there reference the var safely.
-PODMAN_BACKED=false
-if docker info 2>/dev/null | grep -qi "^ *Server Version: *5\."; then
-    PODMAN_BACKED=true
-fi
 
 log "Environment exported (${#TEAM_ID} values set)"
 
@@ -156,11 +198,11 @@ if [[ -d "$TULIP_DIR" ]]; then
     # (same services + suricata, enricher wired to eve.json). Plain
     # docker-compose.yml alone leaves Suricata OFF and the enricher idle.
     TULIP_COMPOSE="-f docker-compose.yml"
-    if [[ -f docker-compose-suricata.yml && -d "$SCRIPT_DIR/suricata/lib/rules" ]]; then
+    if [[ -f docker-compose-suricata.yml && -d "$SCRIPT_DIR/contest-runtime/detection/suricata/lib/rules" ]]; then
         TULIP_COMPOSE="-f docker-compose.yml -f docker-compose-suricata.yml"
-        log "Suricata overlay enabled (rules: suricata/lib/rules/)"
+        log "Suricata overlay enabled (rules: contest-runtime/detection/suricata/lib/rules/)"
     else
-        warn "Suricata overlay or suricata/lib/rules missing — starting Tulip WITHOUT Suricata"
+        warn "Suricata overlay or contest-runtime/detection/suricata/lib/rules missing — starting Tulip WITHOUT Suricata"
     fi
     docker compose $TULIP_COMPOSE build --quiet 2>&1 | tail -3 || warn "Tulip build had warnings"
     log "Starting Tulip..."
@@ -170,61 +212,27 @@ if [[ -d "$TULIP_DIR" ]]; then
 else
     warn "Tulip repo missing — skipping Tulip"
 fi
-# dashboard + mcp-tulip join Tulip's internal network. If Tulip didn't come up
-# (repo missing / failed), create an empty network of that name so those two
-# still start — they degrade (no flow lookups) instead of refusing to run.
+# dashboard joins Tulip's internal network (reads Tulip's API for the Rules
+# tab). If Tulip didn't come up (repo missing / failed), create an empty
+# network of that name so the dashboard still starts — it degrades (no flow
+# lookups) instead of refusing to run.
 if ! docker network inspect tulip_internal >/dev/null 2>&1; then
     warn "Tulip network tulip_internal not found — creating an empty one so the dashboard can still start"
     docker network create tulip_internal >/dev/null
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# 6. Start monitor hub services
+# 6. Start monitor hub services (mode-gated)
 # ═══════════════════════════════════════════════════════════════
-header "Step 6: Start monitor hub services"
+header "Step 6: Start monitor hub services (MODE=$MODE)"
 
 cd "$SCRIPT_DIR"
 log "Building hub images..."
-docker compose build --quiet 2>&1 | tail -3 || warn "Build had warnings"
+docker compose "${COMPOSE_FILES[@]}" build --quiet 2>&1 | tail -3 || warn "Build had warnings"
 
-log "Starting core services (redis, detection, watchdog, dashboard)..."
-if [[ "$MOCK_VULNBOX_ENABLED" == "true" ]]; then
-    docker compose up -d mock-vulnbox redis
-else
-    log "mock_vulnbox.enabled=false — skipping the toy vulnerable app (real vulnbox mode)"
-    docker compose up -d redis
-fi
+log "Starting core services (redis, detection, watchdog)..."
+docker compose "${COMPOSE_FILES[@]}" up -d redis
 sleep 3  # wait for redis; this also creates the ctf-net network
-
-# Under podman, containers reach host services only via a bridge gateway that
-# actually routes back to the host. The only host service containers still
-# need is a local Ollama (Tulip's Postgres is reached over Tulip's own docker
-# network now, not a host port), so probe with Ollama's port.
-if [[ "$PODMAN_BACKED" == true && -z "${DOCKER_HOST_GATEWAY:-}" ]]; then
-    log "Probing bridge gateways for one that actually routes to the host..."
-    CANDIDATES="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null) 172.17.0.1 10.88.0.1"
-    for GW in $CANDIDATES; do
-        [[ -z "$GW" ]] && continue
-        if docker run --rm --network ctf-net busybox sh -c "nc -z -w2 $GW $OLLAMA_PORT" &>/dev/null; then
-            warn "Using bridge gateway: $GW (set DOCKER_HOST_GATEWAY to override next time)"
-            export DOCKER_HOST_GATEWAY="$GW"
-            break
-        fi
-    done
-    [[ -z "${DOCKER_HOST_GATEWAY:-}" ]] && warn "No working bridge gateway found — mcp-tulip may be unreachable"
-fi
-export MCP_POSTGRES_RO_URI="postgresql://${MCP_PG_ROLE}@timescale:5432/${MCP_PG_DB}"
-
-# Ollama: if services.json's ollama.host is set, it's on a DEDICATED machine
-# (see docs/REMOTE_LLM.md) — use that LAN IP directly, no podman gateway
-# weirdness applies since it's a normal network hop, not host-NAT hairpin.
-# Otherwise it's on this same machine, reachable via the gateway above.
-if [[ -n "$OLLAMA_HOST_CFG" ]]; then
-    log "Ollama configured on a remote host: $OLLAMA_HOST_CFG"
-    export OLLAMA_RESOLVED_HOST="$OLLAMA_HOST_CFG"
-else
-    export OLLAMA_RESOLVED_HOST="${DOCKER_HOST_GATEWAY:-host.docker.internal}"
-fi
 
 # Persist every value compose interpolates into ./.env (compose reads it
 # automatically). Without this, any later `docker compose up -d <svc>` — by
@@ -232,10 +240,8 @@ fi
 # config (e.g. detection crashes on an empty TEAMS_CIDR).
 {
     echo "# AUTO-GENERATED by bringup.sh from services.json — re-run bringup.sh instead of editing"
-    for v in TEAM_ID VULNBOX_IP MONITOR_IP TEAMS_CIDR FLAG_REGEX HONEYTOKEN_FLAG HONEYTOKEN_PORT \
-             DASHBOARD_PORT ALERT_QUEUE_PORT IOC_API_PORT TULIP_WEB_PORT BIND_IP \
-             OLLAMA_PORT LLM_MODEL EMBED_MODEL GPU_LAYERS ANYTHINGLLM_PORT \
-             MCP_POSTGRES_RO_URI OLLAMA_RESOLVED_HOST DOCKER_HOST_GATEWAY; do
+    for v in MODE TEAM_ID VULNBOX_IP MONITOR_IP TEAMS_CIDR FLAG_REGEX HONEYTOKEN_FLAG HONEYTOKEN_PORT \
+             DASHBOARD_PORT ALERT_QUEUE_PORT TULIP_WEB_PORT BIND_IP; do
         val="${!v:-}"
         [[ "$val" == *"'"* ]] && die "$v contains a single quote, which .env can't hold literally: $val"
         printf "%s='%s'\n" "$v" "$val"
@@ -243,57 +249,58 @@ fi
 } > "$SCRIPT_DIR/.env"
 ok "Compose environment saved to .env (manual 'docker compose up -d <svc>' now gets the same config)"
 
-docker compose up -d detection watchdog ml-fingerprint mcp-tulip
-sleep 2
+docker compose "${COMPOSE_FILES[@]}" up -d detection watchdog
+ok "Legal defense/monitor services started"
 
-docker compose up -d ioc-brain dashboard anythingllm
-ok "Hub services started"
+if [[ "$MODE" == "prep" ]]; then
+    log "MODE=prep: starting practice fixtures..."
+    if [[ "$ML_CLASSIFIER_ENABLED" == "true" ]]; then
+        log "ml_classifier.enabled=true — starting ml-fingerprint"
+        docker compose "${COMPOSE_FILES[@]}" up -d ml-fingerprint
+    else
+        log "ml_classifier.enabled=false — ml-fingerprint not started"
+    fi
+    if [[ "$MOCK_VULNBOX_ENABLED" == "true" ]]; then
+        docker compose "${COMPOSE_FILES[@]}" up -d mock-vulnbox
+    fi
+fi
 
-# ctf_proxy lives in its own compose project (separate repo, like Tulip) and
-# needs the ctf-net network this file just created, so it must come after.
-# It's currently only wired to front mock-vulnbox (see generators/gen-ctfproxy.py) —
-# fronting a REAL vulnbox needs a deploy step (iptables redirect on the vulnbox
-# itself) that doesn't exist yet. See docs/GOLIVE.md Phase 2.
-CTF_PROXY_DIR="$SCRIPT_DIR/offline-bundle/repos/ctf_proxy"
-if [[ "$MOCK_VULNBOX_ENABLED" != "true" ]]; then
-    log "mock_vulnbox.enabled=false — local mock ctf_proxy skipped; the real one is deployed on the vulnbox by deploy-all.sh (vulnbox-deploy/deploy-ctfproxy.sh)"
-elif [[ -d "$CTF_PROXY_DIR" ]]; then
-    log "Starting ctf_proxy (fronting mock-vulnbox at $VULNBOX_IP)..."
-    (cd "$CTF_PROXY_DIR" && docker compose build --quiet 2>&1 | tail -3 && docker compose up -d) \
-        || warn "ctf_proxy failed to start"
-else
-    warn "ctf_proxy not found at $CTF_PROXY_DIR — skipping"
+docker compose "${COMPOSE_FILES[@]}" up -d dashboard
+ok "Dashboard started"
+
+# ctf_proxy lives in its own compose project (separate repo, like Tulip).
+# Fronting the REAL vulnbox is deployed separately via
+# contest-runtime/defense/deploy-ctfproxy.sh (legal-runtime, runs regardless of
+# MODE, via deploy-all.sh)
+# — this block only starts the LOCAL rehearsal instance in front of
+# mock-vulnbox, which is prep-only.
+if [[ "$MODE" == "prep" && "$MOCK_VULNBOX_ENABLED" == "true" ]]; then
+    CTF_PROXY_DIR="$SCRIPT_DIR/offline-bundle/repos/ctf_proxy"
+    if [[ -d "$CTF_PROXY_DIR" ]]; then
+        log "Starting ctf_proxy (fronting mock-vulnbox at $VULNBOX_IP, rehearsal only)..."
+        (cd "$CTF_PROXY_DIR" && docker compose build --quiet 2>&1 | tail -3 && docker compose up -d) \
+            || warn "ctf_proxy failed to start"
+    else
+        warn "ctf_proxy not found at $CTF_PROXY_DIR — skipping"
+    fi
+elif [[ "$MODE" == "contest" ]]; then
+    log "MODE=contest: local mock ctf_proxy never starts — real ctf_proxy is deployed onto the actual vulnbox by contest-runtime/defense/deploy-ctfproxy.sh (see deploy-all.sh)"
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# 7. Start Ollama (load on demand only — do NOT keep LLM loaded)
+# 6b. Compliance assertion — refuse to continue if contest mode somehow has
+#     a prep-only container running anyway.
 # ═══════════════════════════════════════════════════════════════
-header "Step 7: Ollama setup"
-
-if command -v ollama &>/dev/null; then
-    if ! pgrep -x ollama > /dev/null; then
-        log "Starting Ollama service..."
-        ollama serve &>/tmp/ollama.log &
-        sleep 3
-        ok "Ollama started (models load on demand)"
-    else
-        ok "Ollama already running"
-    fi
-    # Verify models available
-    if ollama list 2>/dev/null | grep -q "${LLM_MODEL%%:*}"; then
-        ok "LLM model available: $LLM_MODEL"
-    else
-        warn "LLM model not pulled yet: $LLM_MODEL"
-        warn "Run: ollama pull '$LLM_MODEL'"
-    fi
-else
-    warn "ollama command not found — IOC Brain will be unavailable"
+if [[ "$MODE" == "contest" ]]; then
+    header "Step 6b: Compliance check"
+    assert_contest_clean
+    ok "Compliance check passed — no prep-only container is running"
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# 8. Health check
+# 7. Health check
 # ═══════════════════════════════════════════════════════════════
-header "Step 8: Health checks"
+header "Step 7: Health checks"
 
 sleep 5  # let services initialize
 
@@ -315,42 +322,47 @@ if docker exec ctf-redis redis-cli ping 2>/dev/null | grep -q PONG; then
 else
     warn "Redis: NOT responding — docker logs ctf-redis"
 fi
-# Health checks are informational only — a slow/down service here (especially
-# AnythingLLM, which boots slowly on first run) must never abort the script
-# under `set -e`, or the rest of bringup (and deploy-all.sh after it) never runs.
+# Health checks are informational only — a slow/down service here must never
+# abort the script under `set -e`, or the rest of bringup (and deploy-all.sh
+# after it) never runs.
 check_service "Detection"    "http://127.0.0.1:$HONEYTOKEN_PORT/health" || true
 check_service "Dashboard"    "http://127.0.0.1:$DASHBOARD_PORT/health" || true
-check_service "IOC Brain"    "http://127.0.0.1:$IOC_API_PORT/health" || true
 
 if [[ -d "$TULIP_DIR" ]]; then
     check_service "Tulip UI" "http://127.0.0.1:$TULIP_WEB_PORT" || true
 fi
 
-check_service "AnythingLLM" "http://127.0.0.1:$ANYTHINGLLM_PORT" || true
+# Final compliance re-check right before declaring success — belt-and-
+# suspenders against a race where a prep container started mid-bringup.
+if [[ "$MODE" == "contest" ]]; then
+    assert_contest_clean
+fi
 
 # ═══════════════════════════════════════════════════════════════
-# 9. Summary
+# 8. Summary
 # ═══════════════════════════════════════════════════════════════
 echo ""
 echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${GREEN}║  🛡  CTF Monitor Hub is UP                          ║${NC}"
+echo -e "${BOLD}${GREEN}║  🛡  CTF Monitor Hub is UP (MODE=$MODE)${NC}"
 echo -e "${BOLD}${GREEN}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${BOLD}${GREEN}║${NC}  Dashboard:     http://localhost:${DASHBOARD_PORT}              ${BOLD}${GREEN}║${NC}"
 echo -e "${BOLD}${GREEN}║${NC}  Tulip UI:      http://localhost:${TULIP_WEB_PORT}              ${BOLD}${GREEN}║${NC}"
-echo -e "${BOLD}${GREEN}║${NC}  IOC Brain:     http://localhost:${IOC_API_PORT}              ${BOLD}${GREEN}║${NC}"
-echo -e "${BOLD}${GREEN}║${NC}  AnythingLLM:   http://localhost:${ANYTHINGLLM_PORT}              ${BOLD}${GREEN}║${NC}"
 echo -e "${BOLD}${GREEN}║${NC}  Honeytoken:    http://localhost:${HONEYTOKEN_PORT}/honeytoken   ${BOLD}${GREEN}║${NC}"
 echo -e "${BOLD}${GREEN}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${BOLD}${GREEN}║${NC}  Vulnbox:  $VULNBOX_IP                              ${BOLD}${GREEN}║${NC}"
 echo -e "${BOLD}${GREEN}║${NC}  Monitor:  $MONITOR_IP                              ${BOLD}${GREEN}║${NC}"
 echo -e "${BOLD}${GREEN}╠══════════════════════════════════════════════════════╣${NC}"
+if [[ "$MODE" == "contest" ]]; then
 echo -e "${BOLD}${GREEN}║${NC}  ⚠️  NO AUTO-BLOCKING. HUMAN DECISION ONLY.          ${BOLD}${GREEN}║${NC}"
+else
+echo -e "${BOLD}${GREEN}║${NC}  ⚠️  PREP MODE — practice fixtures may be running. Do NOT use on contest day. ${BOLD}${GREEN}║${NC}"
+fi
 echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
 log "Next steps:"
 log "  1. Open dashboard: xdg-open http://localhost:$DASHBOARD_PORT"
-log "  2. Deploy vulnbox capture: bash vulnbox-deploy/deploy-capture.sh"
-log "  3. Deploy OS watchdog:     bash vulnbox-deploy/deploy-os-watchdog.sh"
-log "  4. Deploy honeytoken:      bash vulnbox-deploy/deploy-honeytoken.sh"
+log "  2. Deploy vulnbox capture: bash contest-runtime/monitor/deploy-capture.sh"
+log "  3. Deploy OS watchdog:     bash contest-runtime/watchdog/deploy-os-watchdog.sh"
+log "  4. Deploy honeytoken:      bash contest-runtime/detection/deploy-honeytoken.sh"
 log "  5. Test detection:         curl -X POST http://localhost:9998/test/inject-flag  (admin port, loopback only)"
-log "  6. Teardown when done:     bash teardown.sh"
+log "  6. Teardown when done:     MODE=$MODE bash teardown.sh"
