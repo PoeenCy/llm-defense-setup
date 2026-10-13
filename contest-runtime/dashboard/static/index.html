@@ -327,7 +327,16 @@
         <button class="btn primary" id="rs-apply">Test syntax &amp; Apply</button>
         <button class="btn danger" id="rs-rollback">Rollback last change</button>
       </div>
-      <textarea class="code" id="rs-text" spellcheck="false" style="margin:0 8px;width:calc(100% - 16px);min-height:300px;"></textarea>
+      <div class="er-table-wrap" style="margin:0 8px;">
+        <table class="er-table">
+          <thead><tr><th>#</th><th>SID</th><th>Message</th><th>Added</th><th></th></tr></thead>
+          <tbody id="rs-rows"><tr><td colspan="5" class="er-empty">Reload from disk to see the live ruleset.</td></tr></tbody>
+        </table>
+      </div>
+      <details style="margin:8px;">
+        <summary style="cursor:pointer;color:var(--text-dim);font-size:11px;">Raw text (advanced edit -- edit here, then Test syntax &amp; Apply)</summary>
+        <textarea class="code" id="rs-text" spellcheck="false" style="margin:8px 0 0;width:100%;min-height:300px;"></textarea>
+      </details>
       <pre class="out" id="rs-out"></pre>
     </div>
     <div class="panel">

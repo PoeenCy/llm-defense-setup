@@ -1,6 +1,8 @@
 """Suricata ruleset: test-then-apply, rollback, and dry-run against captured traffic."""
 import json
+import re
 import shutil
+from datetime import datetime, timezone
 
 from ..common import ROOT, audit, find_container, run, stamp
 
@@ -11,6 +13,15 @@ TESTFILE = RULES_DIR / ".test.rules"
 BACKUPS = RULES_DIR / "backups"
 IN_CONTAINER = "/var/lib/suricata/rules"
 MAX_BYTES = 16 * 1024 * 1024
+SID_RE = re.compile(r"\bsid\s*:\s*(\d+)")
+# Redis hash sid -> ISO timestamp of the first time that sid appeared in the
+# live ruleset. Lets the dashboard show "when was this rule added" per row
+# without parsing/trusting comments in the rule text itself.
+ADDED_KEY = "suricata_rule_added"
+
+
+def _sids(text: str) -> set[str]:
+    return set(SID_RE.findall(text or ""))
 
 
 def _container():
@@ -39,6 +50,7 @@ def apply(payload, rdb):
     container = _container()
     if not container:
         return {"ok": False, "output": "Suricata container is not running — start it from the Services tab or run deploy-all.sh"}
+    old_sids = _sids(LIVE.read_text()) if LIVE.exists() else set()
     STAGING.write_text(rules)
     ok, out = _syntax_test(container, STAGING.name)
     if not ok:
@@ -56,6 +68,17 @@ def apply(payload, rdb):
     if code != 0:
         audit(rdb, f"Suricata rules written but reload signal failed: {out2}", False)
         return {"ok": False, "output": f"Rules saved (backup {ts}) but reload failed: {out2}"}
+    # Record the first-seen time for any sid that's new in this apply, so the
+    # dashboard can show "when was this rule added" per row. hsetnx: never
+    # overwrites a sid that was already recorded (e.g. re-applying the same
+    # text, or editing an unrelated line, must not reset its timestamp).
+    new_sids = _sids(rules)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        for sid in new_sids - old_sids:
+            rdb.hsetnx(ADDED_KEY, sid, now_iso)
+    except Exception:
+        pass  # metadata only -- never block a real apply over this
     n = sum(1 for l in rules.splitlines() if l.strip() and not l.strip().startswith("#"))
     audit(rdb, f"Suricata rules applied ({n} active rules, backup {ts})", True)
     return {"ok": True, "output": f"Test passed, {n} active rules applied and live-reloaded.\n"
@@ -78,6 +101,10 @@ def delete_rule(payload, rdb):
     result = apply({"rules": "\n".join(kept) + "\n"}, rdb)
     if result.get("ok"):
         audit(rdb, f"Suricata rule sid:{sid} deleted", True)
+        try:
+            rdb.hdel(ADDED_KEY, sid)
+        except Exception:
+            pass
     return result
 
 

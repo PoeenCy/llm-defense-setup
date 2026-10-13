@@ -795,3 +795,35 @@ help-text blocks elsewhere in `index.html`, out of scope for this ask).
 
 Rebuilt and live-verified: `index.html`/`events.js`/`rules.js` all serve 200 with the new
 button markup (`data-act="alert"` / `data-act="block"`) confirmed in the served JS.
+
+
+---
+
+## 2026-10-13 (later still, once more) — structured Suricata rule table (RULES tab)
+
+User flagged the live Suricata ruleset view (tab RULES, 3a) as "rất rối" (very messy) -- it was
+a single raw `<textarea>` dumping the whole file as one block of text, no per-rule structure,
+no way to delete one rule without hand-editing text and re-applying. Asked for a visual table:
+one row per rule, numbered, with a delete button and a timestamp.
+
+**Added**: a numbered table (# / SID / Message / Added / Delete) rendered above the raw
+textarea, which now lives collapsed inside a `<details>` disclosure for power-editing (kept,
+not removed -- still needed for pasting/writing rules by hand).
+
+- `hostagent/actions/suricata.py`: `apply()` now diffs old vs new sids on every apply and
+  records a first-seen timestamp per NEW sid into a Redis hash (`suricata_rule_added`, via
+  `hsetnx` so re-applying never resets an existing rule's time). `delete_rule()` cleans up the
+  hash entry when a rule is removed.
+- `dashboard/app/routes/rules.py`: `GET /api/rules/suricata` now also returns `parsed` -- one
+  structured row per active (non-comment) line, regex-extracting `sid`/`msg`, merged with the
+  Redis timestamps.
+- `rules.js`/`index.html`: new table, `rsRenderRows()`, and `rsDeleteSid()` wired to the
+  already-existing `suricata_delete_rule` backend action (no new delete logic needed there).
+  Pre-existing rules (added before this feature existed) correctly show "-" for Added, since
+  there was never a recorded timestamp for them.
+
+**Verified live, end-to-end**: posted a new test rule through the real API, confirmed its
+`added` timestamp appeared in the parsed list with the correct ISO time; deleted it through the
+real delete endpoint, confirmed the rule count returned to 17, the sid was gone from `parsed`,
+and the Redis hash field was cleaned up (`HGET suricata_rule_added 1000099` -> empty). Confirmed
+`index.html`/`rules.js` serve the new table markup over HTTP.

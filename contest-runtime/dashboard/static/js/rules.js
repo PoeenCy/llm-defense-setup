@@ -314,10 +314,41 @@ async function cpBuild(btn) {
 }
 
 /* ── Step 3: live rulesets ──────────────────────────────────── */
+function rsFormatAdded(iso) {
+  if (!iso) return '<span style="color:var(--text-dim)">-</span>';
+  // "2026-10-13T15:01:31+00:00" -> "10-13 15:01" (no year clutter; this tool
+  // only ever runs within one contest day).
+  const m = iso.match(/(\d{2})-(\d{2})T(\d{2}:\d{2})/);
+  return m ? `${m[1]}-${m[2]} ${m[3]}` : escHtml(iso.slice(0, 16));
+}
+
+function rsRenderRows(parsed) {
+  if (!parsed || !parsed.length) {
+    $('rs-rows').innerHTML = '<tr><td colspan="5" class="er-empty">No active rules.</td></tr>';
+    return;
+  }
+  $('rs-rows').innerHTML = parsed.map(r => `<tr>
+      <td>${r.n}</td>
+      <td>${escHtml(r.sid || '-')}</td>
+      <td class="msg" title="${escHtml(r.line)}">${escHtml(r.msg)}</td>
+      <td style="white-space:nowrap;">${rsFormatAdded(r.added)}</td>
+      <td>${r.sid ? `<button class="er-btn-sm danger" data-rs-del="${escHtml(r.sid)}">Delete</button>` : ''}</td>
+    </tr>`).join('');
+}
+
 async function rsReload() {
   const d = await apiGet('/api/rules/suricata');
   $('rs-text').value = d.rules || '';
   $('rs-out').textContent = d.note ? '✗ ' + d.note : '';
+  rsRenderRows(d.parsed);
+}
+
+async function rsDeleteSid(sid) {
+  if (!confirm(`Delete Suricata rule sid ${sid}? This re-applies the ruleset without it (tested + backed up, same as any other apply).`)) return;
+  const d = await apiPost('/api/rules/suricata/delete', { sid });
+  $('rs-out').textContent = d.ok ? `✓ Deleted sid ${sid}.` : '✗ ' + d.output;
+  showToast(`Delete sid ${sid}: ${d.ok ? 'done' : 'FAILED'}`, d.ok ? 'success' : 'critical');
+  await rsReload();
 }
 
 async function cfLoad() {
@@ -526,6 +557,9 @@ function initRules() {
   $('cp-name').addEventListener('input', () => { cpNameTouched = $('cp-name').value.trim() !== ''; });
 
   $('rs-reload').onclick = rsReload;
+  $('rs-rows').addEventListener('click', ev => {
+    const b = ev.target.closest('[data-rs-del]'); if (b) rsDeleteSid(b.dataset.rsDel);
+  });
   $('lib-file').onchange = libShow;
   $('lib-test').onclick = e => suTest(e.target, $('lib-text').value, 'lib-out');
   $('lib-add').onclick = async () => {

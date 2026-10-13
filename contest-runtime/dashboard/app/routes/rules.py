@@ -2,26 +2,63 @@
 host_agent (ctf_proxy filters live on the vulnbox-host). Every WRITE goes
 through host_agent, which validates before touching anything live and keeps a
 backup for rollback."""
+import re
+
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from ..core.config import LIBRARY_DIR, RULES_PATH
 from ..core.ops import run_op
+from ..core.redisclient import get_redis
 from ..rulegen import ctfproxy, suricata
 
 router = APIRouter(prefix="/api/rules")
+
+_SID_RE = re.compile(r'sid\s*:\s*(\d+)')
+_MSG_RE = re.compile(r'msg\s*:\s*"((?:[^"\\]|\\.)*)"')
+# Same Redis key hostagent/actions/suricata.py writes to on apply/delete.
+_ADDED_KEY = "suricata_rule_added"
 
 
 def _live_suricata_rules() -> str:
     return RULES_PATH.read_text() if RULES_PATH.exists() else ""
 
 
+def _parse_rules(text: str, added: dict) -> list[dict]:
+    """One row per active (non-comment, non-blank) line -- a numbered,
+    structured view of the same file the raw-text editor shows, so the UI can
+    list/delete one rule at a time instead of one wall of text."""
+    rows = []
+    n = 0
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        n += 1
+        sid_m = _SID_RE.search(s)
+        msg_m = _MSG_RE.search(s)
+        sid = sid_m.group(1) if sid_m else None
+        rows.append({
+            "n": n,
+            "sid": sid,
+            "msg": msg_m.group(1) if msg_m else s[:80],
+            "line": s,
+            "added": added.get(sid) if sid else None,
+        })
+    return rows
+
+
 # ── Suricata ──────────────────────────────────────────────────────────────────
 @router.get("/suricata")
 async def get_suricata():
     if not RULES_PATH.exists():
-        return JSONResponse({"rules": "", "note": f"{RULES_PATH} not mounted"}, status_code=404)
-    return {"rules": _live_suricata_rules()}
+        return JSONResponse({"rules": "", "parsed": [], "note": f"{RULES_PATH} not mounted"}, status_code=404)
+    text = _live_suricata_rules()
+    try:
+        added = await get_redis().hgetall(_ADDED_KEY)
+    except Exception:
+        added = {}
+    return {"rules": text, "parsed": _parse_rules(text, added)}
 
 
 @router.post("/suricata")
