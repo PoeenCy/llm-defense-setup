@@ -10,6 +10,13 @@ const TAB_FIRST_OPEN = {
   services: () => loadServices(),
   config: () => loadConfigText(),
 };
+// APPLIED shows live rule counts/hit-counts that change from other tabs (RULES
+// apply/delete, EVENTS quick-actions) -- unlike the others, it must re-fetch
+// on EVERY switch into it, not just the first time, or it silently shows a
+// stale snapshot from whenever it was first opened this page session.
+const TAB_ALWAYS_RELOAD = {
+  applied: () => loadApplied(false),
+};
 
 function showTab(name) {
   if (!document.getElementById('tab-' + name)) name = 'monitor';
@@ -18,6 +25,7 @@ function showTab(name) {
   document.querySelectorAll('#tabnav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   if (!TAB_LOADED[name] && TAB_FIRST_OPEN[name]) { TAB_LOADED[name] = true; TAB_FIRST_OPEN[name](); }
+  else if (TAB_ALWAYS_RELOAD[name]) TAB_ALWAYS_RELOAD[name]();
 }
 
 async function loadMeta() {

@@ -914,3 +914,28 @@ it's gone and the live filter is back to exactly what it was before the test (on
 method, `blk_f_l2zsywcvzmxhzw`, left untouched throughout -- it predates this session's work and
 wasn't created by this test, so it was not touched). Confirmed `index.html`/`rules.js` serve the
 new table markup over HTTP.
+
+
+---
+
+## 2026-10-13 (later still, yet again once more) — APPLIED tab stuck on a stale rule count
+
+User reported adding rules via the RULES tab (library merge -- 6 new "LIB UPLOAD"/"LIB WEBSHELL"
+rules, sids 9210001-9210006) showed up correctly there, but the APPLIED tab kept showing the old
+count ("17 rules") no matter what. Root cause in `main.js`: `showTab()` only ever calls a tab's
+load function the FIRST time that tab is opened this page session (`TAB_LOADED` guard) --
+correct for tabs that are one-time setup (events/services/config), but APPLIED's whole purpose is
+to show what's live *right now*, and its data changes from actions taken on other tabs (RULES
+apply/delete, EVENTS quick-actions). Once opened once, it never refreshed again on switching back
+to it -- only the manual "Refresh" button inside the tab did anything.
+
+**Fix**: added `TAB_ALWAYS_RELOAD` -- a second map, checked after the first-open guard, that
+re-fetches every time you switch INTO that tab (not on first-open, which `TAB_FIRST_OPEN` already
+covers). Applied it to `applied` only; the other tabs' own in-page actions already keep themselves
+in sync (established pattern from the Suricata/ctf_proxy table fixes earlier in this session).
+
+Verified live: confirmed the user's 6 new rules were real additions (not test residue) via
+`GET /api/rules/suricata` (23 active, matches 17 + 6), confirmed `GET /api/applied` already
+returned the correct 23 all along (the bug was purely the frontend never re-calling it) --
+rebuilt the dashboard image, confirmed `main.js` serves `TAB_ALWAYS_RELOAD` and `/api/applied`
+returns 23 over HTTP.
