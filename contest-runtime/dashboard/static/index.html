@@ -342,6 +342,7 @@
     <div class="panel">
       <div class="panel-header"><div class="panel-title"><span>3b</span> ctf_proxy filter (on vulnbox) <span class="state" id="cp-state"></span></div></div>
       <div class="row-actions">
+        <label class="help" style="padding:0;">Service <select id="cf-service" style="margin-left:4px;"></select></label>
         <button class="btn" id="cf-load">Load from vulnbox</button>
         <button class="btn primary" id="cf-apply">Check &amp; Upload</button>
         <button class="btn danger" id="cf-rollback">Rollback last upload</button>
@@ -500,7 +501,7 @@
   <div class="panel">
     <div class="panel-header"><div class="panel-title"><span>🛡</span> ctf_proxy — BLOCKING (vulnbox) <span class="state" id="ap-cp-state"></span></div>
       <button class="btn" id="ap-cp-load">Load rule list from vulnbox</button></div>
-    <div class="er-table-wrap"><table class="er-table"><thead><tr><th>Rule (method)</th><th>Blocks</th><th>Last block</th><th>Blocked clients</th><th></th></tr></thead>
+    <div class="er-table-wrap"><table class="er-table"><thead><tr><th>Service</th><th>Rule (method)</th><th>Blocks</th><th>Last block</th><th>Blocked clients</th><th></th></tr></thead>
       <tbody id="ap-cp"></tbody></table></div>
   </div>
   <div class="panel">

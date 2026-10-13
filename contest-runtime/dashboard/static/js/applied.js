@@ -16,23 +16,29 @@ async function loadApplied(withProxy) {
   $('ap-where').textContent = '⏳ Loading...';
   let d;
   try { d = await apiGet('/api/applied' + (withProxy ? '?proxy=1' : '')); } catch (e) { $('ap-where').textContent = '✗ ' + e; return; }
+  const cps = d.ctfproxy || [];
+  const cpSummary = cps.length ? cps.map(cp =>
+    `  [${cp.service}] ` + (cp.loaded ? `${cp.methods.length} rule(s), ${cp.paused ? 'PAUSED' : 'filtering'}`
+      : cp.error ? `not loaded (${cp.error})` : 'press "Load rule list from vulnbox"') + `\n    → ${cp.location}`
+  ).join('\n') : '  (no TCP service in services.json)';
   $('ap-where').textContent =
     `SURICATA (alert): ${d.suricata.active} active` + (d.suricata.disabled ? `, ${d.suricata.disabled} disabled` : '') +
     `\n  → ${d.suricata.location}` +
-    `\n\nCTF_PROXY (block): ` + (d.ctfproxy.loaded ? `${d.ctfproxy.methods.length} rule(s), ${d.ctfproxy.paused ? 'PAUSED' : 'filtering'}`
-        : d.ctfproxy.error ? `not loaded (${d.ctfproxy.error})` : 'press "Load rule list from vulnbox"') +
-    `\n  → ${d.ctfproxy.location}` +
+    `\n\nCTF_PROXY (block):\n${cpSummary}` +
     `\n\nCounts from the ${d.window}.`;
 
-  const cp = d.ctfproxy;
-  $('ap-cp-state').className = 'state ' + (cp.paused === true ? 'state-paused' : cp.loaded ? 'state-running' : 'state-unknown');
-  $('ap-cp-state').textContent = cp.paused === true ? 'PAUSED' : cp.loaded ? 'FILTERING' : '';
-  $('ap-cp').innerHTML = cp.methods.length ? cp.methods.map(m => `<tr>
+  const anyLoaded = cps.some(cp => cp.loaded);
+  const allPaused = cps.length && cps.every(cp => cp.paused === true);
+  $('ap-cp-state').className = 'state ' + (allPaused ? 'state-paused' : anyLoaded ? 'state-running' : 'state-unknown');
+  $('ap-cp-state').textContent = allPaused ? 'PAUSED' : anyLoaded ? (cps.length > 1 ? `${cps.length} SERVICES` : 'FILTERING') : '';
+  const rows = cps.flatMap(cp => cp.methods.map(m => ({ ...m, service: cp.service })));
+  $('ap-cp').innerHTML = rows.length ? rows.map(m => `<tr>
+      <td>${escHtml(m.service)}</td>
       <td><b>${escHtml(m.name)}</b></td><td>${m.hits}</td>
       <td>${escHtml((m.last_hit || '—').slice(0, 19))}</td>
       <td>${escHtml(m.top_sources.join(', ') || '—')}</td>
-      <td><button class="er-btn-sm danger" data-ap-cp-del="${escHtml(m.name)}" title="remove this rule now">✗ Xóa</button></td></tr>`).join('')
-    : `<tr><td colspan="5" class="er-empty">${cp.loaded ? 'No ctf_proxy block rules defined.' : 'Not loaded — click “Load rule list from vulnbox”. Blocks seen in traffic still appear once they happen.'}</td></tr>`;
+      <td><button class="er-btn-sm danger" data-ap-cp-del="${escHtml(m.name)}" data-ap-cp-service="${escHtml(m.service)}" title="remove this rule now">✗ Xóa</button></td></tr>`).join('')
+    : `<tr><td colspan="6" class="er-empty">${anyLoaded ? 'No ctf_proxy block rules defined.' : 'Not loaded — click “Load rule list from vulnbox”. Blocks seen in traffic still appear once they happen.'}</td></tr>`;
 
   apSuRules = d.suricata.rules;
   renderApSu();
@@ -87,9 +93,10 @@ async function deleteApSu(btn) {
 
 async function deleteApCp(btn) {
   const name = btn.dataset.apCpDel;
-  if (!confirm(`Xóa rule ctf_proxy "${name}"? Sẽ kiểm tra cú pháp + backup trước khi upload lại, có thể Rollback nếu cần.`)) return;
+  const service = btn.dataset.apCpService;
+  if (!confirm(`Xóa rule ctf_proxy "${name}" (service ${service})? Sẽ kiểm tra cú pháp + backup trước khi upload lại, có thể Rollback nếu cần.`)) return;
   btn.disabled = true; btn.textContent = '⏳';
-  const d = await apiPost('/api/rules/ctfproxy/delete', { name });
+  const d = await apiPost('/api/rules/ctfproxy/delete', { name, service });
   if (!d.ok) { alert('✗ Xóa thất bại:\n' + d.output); btn.disabled = false; btn.textContent = '✗ Xóa'; return; }
   await loadApplied(true);
 }

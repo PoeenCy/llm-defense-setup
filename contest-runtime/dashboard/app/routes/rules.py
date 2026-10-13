@@ -8,7 +8,7 @@ import re
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from ..core.config import LIBRARY_DIR, RULES_PATH
+from ..core.config import LIBRARY_DIR, RULES_PATH, load_services_config
 from ..core.ops import run_op
 from ..core.redisclient import get_redis
 from ..rulegen import ctfproxy, suricata
@@ -19,7 +19,28 @@ _SID_RE = re.compile(r'sid\s*:\s*(\d+)')
 _MSG_RE = re.compile(r'msg\s*:\s*"((?:[^"\\]|\\.)*)"')
 # Same Redis keys hostagent/actions/{suricata,ctfproxy}.py write to on apply/delete.
 _ADDED_KEY = "suricata_rule_added"
-_CF_ADDED_KEY = "ctfproxy_rule_added"
+_CF_ADDED_KEY_PREFIX = "ctfproxy_rule_added:"
+
+
+def _ctfproxy_services() -> list[dict]:
+    """Mirrors hostagent/actions/ctfproxy.py's eligible_services() -- duplicated
+    here because the dashboard container and host_agent.py (which runs directly
+    on the monitor host, not in a container) don't share a Python module, only
+    the same services.json. Keep both in sync if the eligibility rule
+    (proto == "tcp") ever changes. UDP services are never eligible -- ctf_proxy
+    only proxies TCP/HTTP."""
+    c = load_services_config()
+    ins = c.get("ctf_proxy", {}).get("insertion", {})
+    out = []
+    for s in c.get("services", []):
+        if s.get("proto", "tcp") != "tcp":
+            continue
+        out.append({
+            "name": s["name"],
+            "http": s.get("layer") in ("l7-http", "l7-https"),
+            "compose_service": s.get("compose_service") or ins.get("remote_compose_service") or "",
+        })
+    return out
 
 
 def _live_suricata_rules() -> str:
@@ -117,12 +138,21 @@ def _parse_ctfproxy_methods(source: str, added: dict) -> list[dict]:
 
 
 # ── ctf_proxy filters (remote) ────────────────────────────────────────────────
+@router.get("/ctfproxy/services")
+async def list_ctfproxy_services():
+    """Pure local config read (no host_agent round-trip) so the service picker
+    in the UI populates instantly. One ctf_proxy deployment fronts every TCP
+    service in services.json; UDP services are never eligible here."""
+    return {"ok": True, "services": _ctfproxy_services()}
+
+
 @router.get("/ctfproxy")
-async def get_ctfproxy():
-    result = await run_op("ctfproxy_get")
+async def get_ctfproxy(service: str = ""):
+    result = await run_op("ctfproxy_get", {"service": service})
     if result.get("ok") and isinstance(result.get("source"), str):
+        svc = result.get("service") or service
         try:
-            added = await get_redis().hgetall(_CF_ADDED_KEY)
+            added = await get_redis().hgetall(_CF_ADDED_KEY_PREFIX + svc) if svc else {}
         except Exception:
             added = {}
         result["parsed"] = _parse_ctfproxy_methods(result["source"], added)
@@ -135,27 +165,33 @@ async def apply_ctfproxy(body: dict):
     errs = ctfproxy.validate_module(source)
     if errs:
         return {"ok": False, "output": "Not uploaded — the filter file has problems:\n" + "\n".join(errs)}
-    return await run_op("ctfproxy_apply", {"source": source})
+    return await run_op("ctfproxy_apply", {"source": source, "service": body.get("service", "")})
 
 
 @router.post("/ctfproxy/rollback")
-async def rollback_ctfproxy():
-    return await run_op("ctfproxy_rollback")
+async def rollback_ctfproxy(body: dict = None):
+    return await run_op("ctfproxy_rollback", {"service": (body or {}).get("service", "")})
 
 
 @router.post("/ctfproxy/delete")
 async def delete_ctfproxy(body: dict):
     """One-click removal of a single live rule method by name — the undo
     button for APPLIED when a rule turns out to be blocking the checker."""
-    return await run_op("ctfproxy_delete_method", {"name": str(body.get("name", ""))}, wait_s=40)
+    return await run_op("ctfproxy_delete_method",
+                         {"name": str(body.get("name", "")), "service": body.get("service", "")}, wait_s=40)
 
 
 @router.post("/ctfproxy/build")
 async def build_ctfproxy(body: dict):
     """Form → Python method, spliced into the current filter source the UI
-    sends along. Returns the new full source for review; nothing is uploaded."""
+    sends along. Returns the new full source for review; nothing is uploaded.
+    stream_type follows the picked service's layer: raw TCP services only get
+    target="raw" (no HTTP parsing to pull url/path/param/header from)."""
     source = body.get("source", "")
-    res = ctfproxy.build_filter(body.get("spec") or {}, source)
+    service = body.get("service", "")
+    svc_info = next((s for s in _ctfproxy_services() if s["name"] == service), None) if service else None
+    stream_type = "tcp" if svc_info and not svc_info["http"] else "http"
+    res = ctfproxy.build_filter(body.get("spec") or {}, source, stream_type=stream_type)
     if res["errors"]:
         return res
     try:

@@ -939,3 +939,102 @@ Verified live: confirmed the user's 6 new rules were real additions (not test re
 returned the correct 23 all along (the bug was purely the frontend never re-calling it) --
 rebuilt the dashboard image, confirmed `main.js` serves `TAB_ALWAYS_RELOAD` and `/api/applied`
 returns 23 over HTTP.
+
+
+---
+
+## 2026-10-13 (later still, one more time) — multi-service/raw-TCP ctf_proxy support, louder exfil alerts
+
+User asked three things in one message: (1) why didn't a rule change show up on the APPLIED
+tab (answered/fixed above), (2) is there a watchdog-style mechanism that auto-creates a
+rule/alert when something leaves a service outbound, like Suricata does, and (3) does
+ctf_proxy block TCP/UDP, not just HTTP, and can logs cover every port.
+
+Investigated (3) and found the real gap: tcpdump/Suricata already build their capture filter
+from EVERY entry in `services.json` (`for s in d['services']`), so adding more services there
+already gets them captured and alerted on -- that part was never limited to one port. But
+`deploy-ctfproxy.sh` and `hostagent/actions/ctfproxy.py` only ever wired ctf_proxy in front of
+`services[0]` and always forced `"http": true`, regardless of the service's actual protocol.
+Checked ctf_proxy's own README/source (`offline-bundle/repos/ctf_proxy`): it supports an
+arbitrary number of services each with their own `target_port`/`listen_port`/`http` flag (nginx
+failover config is auto-generated from `config.json` at container start by
+`generate_nginx_conf.py` -- not something this repo needed to template itself), and each gets
+its own `filter_modules/<name>/<name>_in.py` pair. It does **not** support UDP at all (TCP/HTTP
+only) -- confirmed from its README's feature list.
+
+Asked the user to choose scope (AskUserQuestion) rather than guess: for (2) chose "notify louder,
+no auto-rule" (auto-blocking on a detected leak risks blocking the checker too -- the same
+`/image-sharing/` lesson already baked into `quickBlockFromEvent`'s comments); for (3) chose
+"build multi-service/proto support now" even without the real contest's service list in hand,
+since the work is config-driven either way.
+
+**ctf_proxy multi-service rewrite**:
+- `services.json`: added optional `compose_service` per `services[]` entry (falls back to the
+  old singular `ctf_proxy.insertion.remote_compose_service` when absent, so a config written
+  before this field existed keeps working unchanged).
+- `defense/deploy-ctfproxy.sh`: rewritten to loop over every `proto: "tcp"` service (skips `udp`
+  with a warning pointing at the firewall content-block instead -- ctf_proxy structurally can't
+  proxy UDP), builds ONE `config.json` covering all of them, one nginx port mapping per service,
+  removes/restores port bindings and recreates compose services per-entry instead of assuming
+  exactly one.
+- `hostagent/actions/ctfproxy.py`: `_ctx()` now takes a `service` name from the payload (new
+  `eligible_services()`/`_sanitize()`, mirroring the deploy script's naming) and resolves the
+  right `filter_modules/<service>/<service>_in.py` path; defaults to the first eligible service
+  when omitted, so nothing broke for the existing single-service call sites that don't pass one
+  yet. Added `list_services` action (pure config read, no SSH). `pause_filter`/`resume_filter`
+  now pause/resume ALL services when the SERVICES tab's global button is used (a partial pause
+  leaving one service still blocking defeats the point of a kill switch), or just one when a
+  `service` is named. `uninstall` restores the whole backed-up compose file and checks every
+  service's port on the way back up, not just one. `services.py`'s `_ctfproxy_state()` now
+  aggregates all services' paused/running state (`running`/`paused`/`degraded` with detail).
+- `rulegen/ctfproxy.py`: `build_filter()` takes a new `stream_type` ("http" default, or "tcp"
+  for a raw/non-HTTP service). In "tcp" mode only `target="raw"` is accepted (there's no parsed
+  HTTP message to pull url/path/param/header from), the generated method is typed
+  `stream: TCPStream` instead of `HTTPStream`, and skips the HTTP-only
+  `message = stream.current_http_message` step entirely.
+- `routes/rules.py`: new `GET /api/rules/ctfproxy/services` (local config read, no host_agent
+  round-trip, so the picker populates instantly); every ctf_proxy endpoint now takes/forwards a
+  `service` name; `build_ctfproxy` looks up the picked service's `http` flag to choose
+  `stream_type`; per-service Redis added-time key (`ctfproxy_rule_added:<service>`, was a single
+  shared key -- two services could otherwise collide on a method name).
+- `routes/applied.py`: `ctfproxy` is now a LIST (one entry per TCP service) instead of a single
+  object; `proxy-blocked` hit-counts are keyed by `(service, rule)` since ctf_proxy's own block
+  answer already carries which service blocked (confirmed from `detection_service.py`'s
+  `PROXY_BLOCK_RE` -- it was always `<keyword> <service> <rule>`, this repo just never split on
+  service before).
+- UI: `index.html`/`rules.js` panel 3b gets a service `<select>` (`cf-service`); every
+  add/edit/delete/apply/rollback/build call in `rules.js` now passes the picked service.
+  `applied.js` renders ctf_proxy's table across however many services came back, with a new
+  "Service" column; delete buttons there carry the service too.
+
+**Verified**: `python3 contest-runtime/dashboard/tests/test_rulegen.py` -- all 12 existing tests
+still pass unchanged (default `stream_type="http"` behaves exactly as before). Manually verified
+the new `stream_type="tcp"` path: `target` other than `raw` is rejected, the generated method
+type-hints `TCPStream`, has no `current_http_message` reference, and actually matches/doesn't-
+match a raw byte payload correctly when executed. Dry-ran `deploy-ctfproxy.sh`'s embedded Python
+(both the precondition-extraction and config.json-generation halves) against the real
+`services.json` and confirmed byte-identical output to what the old single-service version would
+have produced (name=web, http=true, same port). Did NOT re-run the live insertion against
+`dfcd-vbox` -- it already has a working ctf_proxy deployment from before this session, and
+re-running it would cause real (if brief) downtime just to test a refactor that's already been
+validated at the config-generation level; the real test will come naturally the next time
+ctf_proxy needs a fresh install. Live-verified everything downstream of that deployment through
+the real API against `dfcd-vbox`: `GET /api/rules/ctfproxy/services` (service list), full
+add→edit→delete cycle through `/build`/apply/delete with `service: "web"` (all correct, including
+the per-service Redis timestamp), `GET /api/applied?proxy=1` (now returns a list), and the
+SERVICES tab's pause/resume via `POST /api/services/ctfproxy/{pause,resume}_filter` (state
+correctly reports `paused`/`running` with per-service detail, then back to normal). All
+JS (`rules.js`, `applied.js`, `main.js`, `core.js`) parsed clean with `esprima` after every edit.
+
+**Louder exfil notifications** (the "notify more, don't auto-rule" half of the watchdog
+question): `core.js`'s `notifyNewAlert` now special-cases `flag-out`/`honeytoken-out`/
+`honeytoken` (data that actually left a service) separately from the generic "critical" path --
+a sticky toast that only dismisses on click (not the usual ~3s auto-fade), an un-throttled alarm
+beep (a burst of several leaks in a few seconds each gets their own beep instead of only the
+first), and a browser `Notification` with `requireInteraction: true` so the OS-level popup
+doesn't auto-close either. No new rule is ever created automatically -- this only makes sure a
+human can't miss the event; Alert/Block are still one click away in EVENTS, same as before.
+Verified live: `POST http://<monitor>:9998/test/inject-flag` (detection_service's existing test
+endpoint) pushes a real `flag-out` alert into Redis, confirmed it's recorded (`GET /api/applied`
+builtin counts incremented) -- the dashboard-side rendering (`core.js`) was verified by code
+review + `esprima` parse since a live browser wasn't available to click through in this session.

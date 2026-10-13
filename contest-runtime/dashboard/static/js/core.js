@@ -48,26 +48,40 @@ function closeModal(e) {
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal({}); });
 
 // ── Toast notifications ────────────────────────────────────────
-function showToast(msg, type = 'info') {
+// sticky: stays on screen until clicked (instead of auto-dismissing after
+// ~3s) -- for data actually leaving a service (flag-out/honeytoken-out),
+// where a glance-and-it's-gone toast is too easy to miss.
+function showToast(msg, type = 'info', sticky = false) {
   const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
-  toast.textContent = msg;
+  if (sticky) {
+    toast.style.cursor = 'pointer';
+    toast.title = 'Click to dismiss';
+    toast.textContent = msg;
+    toast.onclick = () => toast.remove();
+  } else {
+    toast.textContent = msg;
+    setTimeout(() => toast.remove(), 3200);
+  }
   container.appendChild(toast);
-  setTimeout(() => toast.remove(), 3200);
+  return toast;
 }
 
 // ── Audible alarm for attacks ──────────────────────────────────
 // WebAudio beep, no sound file needed. Gated by the 🔊 toggle (saved per
-// browser) and throttled so a burst of alerts can't become a beep storm.
+// browser) and normally throttled so a burst of alerts can't become a beep
+// storm -- except when bypassThrottle is set (flag-out/honeytoken-out: data
+// actually left a service, rare enough that every one of them deserves its
+// own beep even if several land in the same couple of seconds).
 let _lastBeep = 0;
 function soundOn() {
   try { return localStorage.getItem('ctf_sound') !== 'off'; } catch (e) { return true; }
 }
-function playAlarm(urgent) {
+function playAlarm(urgent, bypassThrottle = false) {
   if (!urgent && !soundOn()) return;
   const now = Date.now();
-  if (!urgent && now - _lastBeep < 2500) return;   // throttle
+  if (!urgent && !bypassThrottle && now - _lastBeep < 2500) return;   // throttle
   _lastBeep = now;
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -88,12 +102,27 @@ function playAlarm(urgent) {
   } catch (e) { /* audio not available */ }
 }
 
+// Data actually leaving a service -- the one thing worth being louder about
+// than everything else, short of auto-blocking (which we deliberately don't
+// do -- see quickBlockFromEvent's comments in rules.js). No new rule is ever
+// created automatically; this only makes sure a human can't miss it.
+const EXFIL_TYPES = new Set(['flag-out', 'flag_out', 'honeytoken-out', 'honeytoken']);
+
 function notifyNewAlert(a) {
   const prio = getPriority(a);
-  if (prio === 'critical') {
+  const isExfil = EXFIL_TYPES.has(a.type || '');
+  if (isExfil) {
+    showToast(`🚨 DATA LEFT A SERVICE: ${(a.message||'').slice(0,80)}`, 'critical', true);
+    playAlarm(false, true);
+    try {
+      if (Notification.permission === 'granted') {
+        const n = new Notification('🚨 Flag/honeytoken left a service', { body: a.message, requireInteraction: true });
+        n.onclick = () => window.focus();
+      }
+    } catch (e) { /* no Notification API */ }
+  } else if (prio === 'critical') {
     showToast(`🚨 CRITICAL: ${(a.message||'').slice(0,60)}`, 'critical');
     playAlarm(false);
-    // Optional: browser notification (works even if the tab isn't focused)
     try {
       if (Notification.permission === 'granted') new Notification('🚨 CTF ALERT', { body: a.message });
     } catch (e) { /* no Notification API */ }

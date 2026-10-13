@@ -301,7 +301,7 @@ async function cpBuild(btn) {
       nocase: $('cp-nocase').checked, only_method: $('cp-meth').value, only_path_contains: $('cp-path').value,
       param_name: t === 'param' ? $('cp-pname').value : '', header_name: t === 'header' ? $('cp-pname').value : '',
     };
-    const d = await apiPost('/api/rules/ctfproxy/build', { spec, source: $('cf-text').value });
+    const d = await apiPost('/api/rules/ctfproxy/build', { spec, source: $('cf-text').value, service: cfSvc() });
     if (d.errors && d.errors.length) { out.textContent = '✗ Fix these first:\n- ' + d.errors.join('\n- '); return; }
     $('cf-text').value = d.source;
     cfRenderFromText();
@@ -487,8 +487,26 @@ function cfRenderRows(parsed) {
 
 function cfRenderFromText() { cfRenderRows(cfParseLocal($('cf-text').value)); }
 
+/* One ctf_proxy deployment fronts every TCP service in services.json -- the
+   dropdown picks which one 3b is looking at. UDP services never appear here
+   (ctf_proxy can't proxy them; use the SERVICES tab's content-based firewall
+   block instead). */
+let cfServices = [];
+function cfSvc() { return $('cf-service').value || ''; }
+
+async function cfLoadServices() {
+  const d = await apiGet('/api/rules/ctfproxy/services');
+  cfServices = (d && d.services) || [];
+  const cur = $('cf-service').value;
+  $('cf-service').innerHTML = cfServices.length
+    ? cfServices.map(s => `<option value="${escHtml(s.name)}">${escHtml(s.name)}${s.http ? '' : ' (raw TCP)'}</option>`).join('')
+    : '<option value="">(no TCP service configured)</option>';
+  if (cur && cfServices.some(s => s.name === cur)) $('cf-service').value = cur;
+}
+
 async function cfLoad() {
-  const d = await apiGet('/api/rules/ctfproxy');
+  if (!cfServices.length) await cfLoadServices();
+  const d = await apiGet('/api/rules/ctfproxy?service=' + encodeURIComponent(cfSvc()));
   if (!d.ok) { $('cf-out').textContent = '✗ ' + d.output; $('cp-state').className = 'state'; $('cp-state').textContent = ''; return false; }
   $('cf-text').value = d.source;
   $('cf-path').textContent = d.path;
@@ -504,7 +522,7 @@ async function cfLoad() {
 
 async function cfDeleteMethod(name) {
   if (!confirm(`Delete ctf_proxy rule ${name}()? This re-uploads the filter without it (tested + backed up, same as any other upload).`)) return;
-  const d = await apiPost('/api/rules/ctfproxy/delete', { name });
+  const d = await apiPost('/api/rules/ctfproxy/delete', { name, service: cfSvc() });
   $('cf-out').textContent = d.ok ? `✓ Deleted ${name}().` : '✗ ' + d.output;
   showToast(`Delete ${name}(): ${d.ok ? 'done' : 'FAILED'}`, d.ok ? 'success' : 'critical');
   await cfLoad();
@@ -541,7 +559,7 @@ async function cfSaveEdit(n) {
     return;
   }
   $('cf-text').value = full.replace(row.code, newBody + row.trailing);
-  const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value });
+  const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value, service: cfSvc() });
   $('cf-out').textContent = d.ok ? `✓ ${row.name}() updated and uploaded.` : '✗ ' + d.output;
   showToast(`Edit ${row.name}(): ${d.ok ? 'done' : 'FAILED'}`, d.ok ? 'success' : 'critical');
   await cfLoad();
@@ -642,9 +660,12 @@ async function quickBlockFromEvent(e) {
     if (errOut.startsWith('✗') || errOut.startsWith('⚠')) {
       cpRes = { ok: false, msg: 'ctf_proxy: ' + errOut };
     } else {
-      const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value });
+      // Targets whichever service is picked in 3b's dropdown -- a quick-action
+      // from EVENTS doesn't know which service the event's port maps to, so
+      // make sure the right one is selected there first in a multi-service setup.
+      const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value, service: cfSvc() });
       if (d.ok) await cfLoad(); else cfRenderFromText();
-      cpRes = { ok: d.ok, msg: d.ok ? `✓ ctf_proxy now blocking on "${best.value.slice(0, 60)}".` : '✗ ctf_proxy: ' + d.output };
+      cpRes = { ok: d.ok, msg: d.ok ? `✓ ctf_proxy (${cfSvc()}) now blocking on "${best.value.slice(0, 60)}".` : '✗ ctf_proxy: ' + d.output };
     }
   }
   return { ok: cpRes.ok, msg: `${cpRes.msg}\nSee/undo in the APPLIED tab.` };
@@ -734,7 +755,7 @@ function initRules() {
     const name = e.target.dataset.name;
     if (!name || !confirm(`Bỏ rule "${name}" vừa chèn? Nếu đã bấm "Check & Upload" rồi thì xóa thật trên vulnbox; nếu chưa thì chỉ nạp lại filter gốc.`)) return;
     e.target.disabled = true;
-    await apiPost('/api/rules/ctfproxy/delete', { name });   // no-op (ok:false, ignored) if it was never uploaded
+    await apiPost('/api/rules/ctfproxy/delete', { name, service: cfSvc() });   // no-op (ok:false, ignored) if it was never uploaded
     await cfLoad();                                          // either way, reload what's actually live now
     e.target.hidden = true; e.target.disabled = false;
   };
@@ -792,11 +813,13 @@ function initRules() {
       await rsReload();   // re-fetch from disk rather than trust d.rules, so timestamps/live-set stay accurate
     });
   };
+  cfLoadServices();   // local config read, no SSH -- safe to do unconditionally at page load
+  $('cf-service').onchange = () => withBusy({ disabled: false, textContent: '' }, 'cf-out', 'Loading from vulnbox...', async () => { await cfLoad(); });
   $('cf-load').onclick = e => withBusy(e.target, 'cf-out', 'Loading from vulnbox...', async () => { await cfLoad(); });
   $('cf-apply').onclick = e => {
     if (!confirm('Upload this filter to ctf_proxy? Rules start BLOCKING immediately (unless filtering is paused).')) return;
     withBusy(e.target, 'cf-out', 'Checking & uploading...', async out => {
-      const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value });
+      const d = await apiPost('/api/rules/ctfproxy', { source: $('cf-text').value, service: cfSvc() });
       showResult(out, d);
       showToast(d.ok ? 'ctf_proxy filter uploaded' : 'Upload rejected — see output', d.ok ? 'success' : 'critical');
       if (d.ok) await cfLoad(); else cfRenderFromText();
@@ -805,7 +828,7 @@ function initRules() {
   $('cf-rollback').onclick = e => {
     if (!confirm('Restore the previous ctf_proxy filter?')) return;
     withBusy(e.target, 'cf-out', 'Rolling back...', async out => {
-      const d = await apiPost('/api/rules/ctfproxy/rollback');
+      const d = await apiPost('/api/rules/ctfproxy/rollback', { service: cfSvc() });
       showResult(out, d);
       await cfLoad();   // re-fetch from disk rather than trust d.source, so timestamps/live-set stay accurate
     });

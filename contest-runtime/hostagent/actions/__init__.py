@@ -7,6 +7,7 @@ ACTIONS = {
     "suricata_rollback": suricata.rollback,
     "suricata_test_traffic": suricata.test_traffic,
     "suricata_delete_rule": suricata.delete_rule,
+    "ctfproxy_services": ctfproxy.list_services,
     "ctfproxy_get": ctfproxy.get,
     "ctfproxy_apply": ctfproxy.apply,
     "ctfproxy_rollback": ctfproxy.rollback,

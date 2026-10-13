@@ -14,12 +14,21 @@ from ..core.config import RULES_PATH
 from ..core.ops import run_op
 from ..core.redisclient import get_redis
 from ..rulegen.ctfproxy import existing_methods
+from .rules import _ctfproxy_services
 
 router = APIRouter(prefix="/api/applied")
 
 _SID = re.compile(r"\bsid\s*:\s*(\d+)")
 _MSG = re.compile(r'\bmsg\s*:\s*"((?:[^"\\]|\\.)*)"')
 _MSG_SID = re.compile(r"^\[(\d+)\]")
+
+
+def _sanitize_service_name(name: str) -> str:
+    """Matches hostagent/actions/ctfproxy.py's _sanitize() -- ctf_proxy's own
+    config.json (and so its block-answer keyword response) uses this form,
+    not necessarily services.json's raw display name."""
+    n = re.sub(r"[^a-zA-Z0-9_]", "_", (name or "").strip()) or "svc"
+    return "s_" + n if n[0].isdigit() else n
 
 
 def _hits(events, key):
@@ -66,28 +75,37 @@ async def applied(proxy: int = 0):
                       **_fmt(sur.get(sid, {"hits": 0, "last": "", "sources": Counter()}))})
     disabled = sum(1 for ln in text.splitlines() if re.match(r"^\s*#\s*(alert|drop)\s", ln))
 
-    # ── ctf_proxy (vulnbox) ──
-    blk = _hits([e for e in events if e.get("type") == "proxy-blocked"], lambda e: e.get("rule"))
-    proxy_info = {"location": "vulnbox: ctf-proxy-<team>/proxy/filter_modules/web/web_in.py (ctf_proxy reloads it on change)",
-                  "loaded": False, "paused": None, "error": None, "methods": []}
-    names = set(blk)
-    if proxy:
-        d = await run_op("ctfproxy_get", wait_s=40)
-        if d.get("ok"):
-            proxy_info.update(loaded=True, paused=d.get("paused"), location=d.get("path") or proxy_info["location"])
-            names |= existing_methods(d["source"]) - {"execute"}
-        else:
-            proxy_info["error"] = d.get("output")
-    proxy_info["methods"] = sorted(
-        ({"name": n, **_fmt(blk.get(n, {"hits": 0, "last": "", "sources": Counter()}))} for n in names),
-        key=lambda m: -m["hits"])
+    # ── ctf_proxy (vulnbox) -- one entry per TCP service; UDP services never
+    # get a ctf_proxy entry at all (it can't proxy them). Keyed by ctf_proxy's
+    # own (sanitized) service name, since that's what's in the block answer. ──
+    blk = _hits([e for e in events if e.get("type") == "proxy-blocked" and e.get("rule")],
+                lambda e: (e.get("service"), e.get("rule")))
+    proxy_list = []
+    for svc in _ctfproxy_services():
+        san = _sanitize_service_name(svc["name"])
+        svc_hits = {rule: v for (s, rule), v in blk.items() if s == san}
+        info = {"service": svc["name"], "http": svc["http"],
+                "location": f"vulnbox: ctf-proxy-<team>/proxy/filter_modules/{san}/{san}_in.py (ctf_proxy reloads it on change)",
+                "loaded": False, "paused": None, "error": None, "methods": []}
+        names = set(svc_hits)
+        if proxy:
+            d = await run_op("ctfproxy_get", {"service": svc["name"]}, wait_s=40)
+            if d.get("ok"):
+                info.update(loaded=True, paused=d.get("paused"), location=d.get("path") or info["location"])
+                names |= existing_methods(d["source"]) - {"execute"}
+            else:
+                info["error"] = d.get("output")
+        info["methods"] = sorted(
+            ({"name": n, **_fmt(svc_hits.get(n, {"hits": 0, "last": "", "sources": Counter()}))} for n in names),
+            key=lambda m: -m["hits"])
+        proxy_list.append(info)
 
     # ── built-in detectors (not editable rules, but they raise events too) ──
     builtin = Counter(e.get("type") for e in events if e.get("type") not in ("suricata", "proxy-blocked"))
     return {
         "suricata": {"location": "monitor host: contest-runtime/detection/suricata/lib/rules/suricata.rules (Suricata reads the captured pcaps)",
                      "active": len(rules), "disabled": disabled, "rules": rules},
-        "ctfproxy": proxy_info,
+        "ctfproxy": proxy_list,
         "builtin": [{"type": t, "count": c} for t, c in builtin.most_common()],
         "window": f"last {len(events)} stored alerts",
     }

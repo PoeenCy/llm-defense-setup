@@ -43,21 +43,28 @@ def _capture_state() -> tuple[str, str]:
 
 
 def _ctfproxy_state() -> tuple[str, str]:
-    x, err = ctfproxy._ctx()
+    services = ctfproxy.eligible_services(cfg())
+    if not services:
+        return "disabled", "no TCP services in services.json for ctf_proxy to front"
+    x0, err = ctfproxy._ctx({})
     if err:
         return "disabled", "monitor-only mode (ctf_proxy.insertion.mode is not docker-compose)"
-    code, out = ssh(x["alias"],
-                    f"docker inspect -f '{{{{.State.Status}}}}' ctfproxy-{x['team']}-nginx ctfproxy-{x['team']}-proxy 2>/dev/null; "
-                    f"test -f {ctfproxy._q(x['paused'])} && echo PAUSED || true", timeout=15)
+    sans = " ".join(ctfproxy._q(s["san"]) for s in services)
+    cmd = (f"docker inspect -f '{{{{.State.Status}}}}' ctfproxy-{x0['team']}-nginx ctfproxy-{x0['team']}-proxy 2>/dev/null; "
+           f"for s in {sans}; do test -f ~/{x0['base']}/filter-backups/${{s}}_in.py.paused-rules && echo \"PAUSED:$s\"; done")
+    code, out = ssh(x0["alias"], cmd, timeout=15)
     if code == 255 or code < 0:
         return "unknown", "vulnbox unreachable over SSH — state unknown"
     lines = [l.strip() for l in out.splitlines() if l.strip()]
-    states = [l for l in lines if l != "PAUSED"]
-    if states.count("running") != 2:
-        return "down", f"containers: {', '.join(states) or 'not found'}"
-    if "PAUSED" in lines:
-        return "paused", "in the traffic path, but filtering paused — everything passes"
-    return "running", "filtering active"
+    container_states = [l for l in lines if not l.startswith("PAUSED:")]
+    paused = [l.split(":", 1)[1] for l in lines if l.startswith("PAUSED:")]
+    if container_states.count("running") != 2:
+        return "down", f"containers: {', '.join(container_states) or 'not found'}"
+    if not paused:
+        return "running", f"filtering active ({len(services)} service(s))"
+    if len(paused) == len(services):
+        return "paused", "in the traffic path, but filtering paused on all services — everything passes"
+    return "degraded", f"filtering paused on: {', '.join(paused)}; still active on the rest"
 
 
 def _state_of(svc: dict) -> dict:
@@ -131,7 +138,7 @@ def control(payload, rdb):
         msg = out[-1500:]
     else:
         if op == "restart":
-            x, err = ctfproxy._ctx()
+            x, err = ctfproxy._ctx({})
             if err:
                 return {"ok": False, "output": err}
             code, out = ssh(x["alias"], f"docker restart ctfproxy-{x['team']}-proxy", timeout=90)

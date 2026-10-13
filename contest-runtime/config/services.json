@@ -75,8 +75,9 @@
       "port": 8003,
       "proto": "tcp",
       "layer": "l7-http",
+      "compose_service": "public-proxy",
       "description": "team-03 public-proxy -> DFCD app stack (php/ws/mathsays)",
-      "note": "team-03 public-proxy -> DFCD app stack (php/ws/mathsays). Capture is now on the external interface (pre-NAT), so port 8003 (the public port) is what both tcpdump and Tulip see directly -- no capture_port override needed."
+      "note": "team-03 public-proxy -> DFCD app stack (php/ws/mathsays). Capture is now on the external interface (pre-NAT), so port 8003 (the public port) is what both tcpdump and Tulip see directly -- no capture_port override needed. compose_service = the docker-compose service name on the vulnbox backing this port, used by deploy-ctfproxy.sh/hostagent to insert ctf_proxy per-service (falls back to ctf_proxy.insertion.remote_compose_service when a service entry omits this, for single-service configs written before this field existed)."
     }
   ],
   "retention": {
