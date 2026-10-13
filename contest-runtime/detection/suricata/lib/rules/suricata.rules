@@ -21,3 +21,4 @@ alert http any any -> any any (msg:"LIB RECON nmap HTTP probe path"; flow:to_ser
 alert http any any -> any any (msg:"LIB RECON unusual HTTP method (TRACE/TRACK/PROPFIND/DEBUG/CONNECT)"; flow:to_server,established; http.method; pcre:"/^(TRACE|TRACK|PROPFIND|DEBUG|CONNECT|SEARCH)$/"; classtype:attempted-recon; sid:9201014; rev:1; priority:3;)
 alert http any any -> any any (msg:"LIB SCAN burst of 404s from one source (dir brute force) — 20 in 10s"; flow:to_client,established; http.stat_code; content:"404"; threshold:type both, track by_dst, count 20, seconds 10; classtype:attempted-recon; sid:9201015; rev:1; priority:2;)
 alert tcp any any -> any any (msg:"LIB SCAN many new connections from one source (port/service sweep) — 60 SYN in 10s"; flags:S,12; flow:stateless; threshold:type both, track by_src, count 60, seconds 10; classtype:network-scan; sid:9201016; rev:1; priority:3;)
+

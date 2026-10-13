@@ -275,7 +275,8 @@ function suAddToRuleset() {
   if (ta.value.includes(rule)) { $('su-out').textContent = 'Already in the ruleset below.'; return; }
   ta.value = ta.value.replace(/\s*$/, '\n') + `# added ${new Date().toISOString().slice(0, 19)} from rule builder\n${rule}\n`;
   ta.scrollTop = ta.scrollHeight;
-  $('su-out').textContent = '✓ Added to the ruleset editor (3a). It is NOT live yet — press "Test syntax & Apply" there.';
+  rsRenderFromText();
+  $('su-out').textContent = '✓ Added to the ruleset table/editor below (3a) -- see it marked "not applied yet". Press "Test syntax & Apply" there to make it live.';
 }
 
 /* ── Step 2b: ctf_proxy builder ─────────────────────────────── */
@@ -313,7 +314,19 @@ async function cpBuild(btn) {
   });
 }
 
-/* ── Step 3: live rulesets ──────────────────────────────────── */
+/* ── Step 3: live rulesets ──────────────────────────────────────────────
+   The table is ALWAYS re-derived from whatever is currently in #rs-text --
+   never a separate source of truth. That's deliberate: #rs-text is the one
+   place "Add to ruleset", the rule library, and hand-editing all write to,
+   and all of those are drafts until "Test syntax & Apply" actually uploads
+   them. If the table only refreshed from the server, adding a draft rule
+   would make it vanish from view until Apply -- confusing, looks like the
+   add silently failed. So: every row is tagged live (confirmed on disk, as
+   of the last successful reload/apply) or draft (only in the textarea so
+   far) and gets different actions accordingly. ── */
+let rsLiveSids = new Set();   // sids confirmed present after the last reload/apply
+let rsAddedMap = {};          // sid -> ISO timestamp, from the server
+
 function rsFormatAdded(iso) {
   if (!iso) return '<span style="color:var(--text-dim)">-</span>';
   // "2026-10-13T15:01:31+00:00" -> "10-13 15:01" (no year clutter; this tool
@@ -322,25 +335,55 @@ function rsFormatAdded(iso) {
   return m ? `${m[1]}-${m[2]} ${m[3]}` : escHtml(iso.slice(0, 16));
 }
 
+function rsParseLocal(text) {
+  const rows = [];
+  let n = 0;
+  for (const raw of (text || '').split('\n')) {
+    const s = raw.trim();
+    if (!s || s.startsWith('#')) continue;
+    n++;
+    const sidM = s.match(/sid\s*:\s*(\d+)/);
+    const msgM = s.match(/msg\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const sid = sidM ? sidM[1] : null;
+    rows.push({ n, sid, msg: msgM ? msgM[1] : s.slice(0, 80), line: s,
+                added: sid ? (rsAddedMap[sid] || null) : null,
+                live: sid ? rsLiveSids.has(sid) : false });
+  }
+  return rows;
+}
+
 function rsRenderRows(parsed) {
+  rsLastParsed = parsed || [];
   if (!parsed || !parsed.length) {
     $('rs-rows').innerHTML = '<tr><td colspan="5" class="er-empty">No active rules.</td></tr>';
     return;
   }
-  $('rs-rows').innerHTML = parsed.map(r => `<tr>
+  $('rs-rows').innerHTML = parsed.map(r => {
+    const added = r.live ? rsFormatAdded(r.added) : '<span style="color:var(--accent-cyan)">not applied yet</span>';
+    const actions = !r.sid ? ''
+      : r.live ? `<button class="er-btn-sm" data-rs-edit="${r.n}">Edit</button> <button class="er-btn-sm danger" data-rs-del="${escHtml(r.sid)}">Delete</button>`
+      : `<button class="er-btn-sm" data-rs-remove="${r.n}" title="Removes this draft line from the editor -- it was never applied, so there is nothing live to delete">Remove draft</button>`;
+    return `<tr data-rs-n="${r.n}">
       <td>${r.n}</td>
       <td>${escHtml(r.sid || '-')}</td>
       <td class="msg" title="${escHtml(r.line)}">${escHtml(r.msg)}</td>
-      <td style="white-space:nowrap;">${rsFormatAdded(r.added)}</td>
-      <td>${r.sid ? `<button class="er-btn-sm danger" data-rs-del="${escHtml(r.sid)}">Delete</button>` : ''}</td>
-    </tr>`).join('');
+      <td style="white-space:nowrap;">${added}</td>
+      <td style="white-space:nowrap;">${actions}</td>
+    </tr>`;
+  }).join('');
 }
+
+let rsLastParsed = [];
+function rsRenderFromText() { rsRenderRows(rsParseLocal($('rs-text').value)); }
 
 async function rsReload() {
   const d = await apiGet('/api/rules/suricata');
   $('rs-text').value = d.rules || '';
   $('rs-out').textContent = d.note ? '✗ ' + d.note : '';
-  rsRenderRows(d.parsed);
+  rsLiveSids = new Set();
+  rsAddedMap = {};
+  (d.parsed || []).forEach(r => { if (r.sid) { rsLiveSids.add(r.sid); if (r.added) rsAddedMap[r.sid] = r.added; } });
+  rsRenderFromText();
 }
 
 async function rsDeleteSid(sid) {
@@ -348,6 +391,44 @@ async function rsDeleteSid(sid) {
   const d = await apiPost('/api/rules/suricata/delete', { sid });
   $('rs-out').textContent = d.ok ? `✓ Deleted sid ${sid}.` : '✗ ' + d.output;
   showToast(`Delete sid ${sid}: ${d.ok ? 'done' : 'FAILED'}`, d.ok ? 'success' : 'critical');
+  await rsReload();
+}
+
+function rsRemoveDraft(n) {
+  const row = rsLastParsed.find(r => r.n === n);
+  if (!row) return;
+  const lines = $('rs-text').value.split('\n');
+  const idx = lines.findIndex(l => l.trim() === row.line);
+  if (idx >= 0) lines.splice(idx, 1);
+  $('rs-text').value = lines.join('\n');
+  rsRenderFromText();
+}
+
+function rsStartEdit(n) {
+  const row = rsLastParsed.find(r => r.n === n);
+  const tr = $('rs-rows').querySelector(`tr[data-rs-n="${n}"]`);
+  if (!row || !tr) return;
+  const cells = tr.querySelectorAll('td');
+  cells[2].innerHTML = `<textarea class="code" id="rs-edit-${n}" style="width:100%;min-height:60px;" spellcheck="false">${escHtml(row.line)}</textarea>`;
+  cells[4].innerHTML = `<button class="er-btn-sm primary" data-rs-save="${n}">Save</button> <button class="er-btn-sm" data-rs-cancel="${n}">Cancel</button>`;
+}
+
+async function rsSaveEdit(n) {
+  const row = rsLastParsed.find(r => r.n === n);
+  const ta = $(`rs-edit-${n}`);
+  if (!row || !ta) return;
+  const newLine = ta.value.trim();
+  if (!newLine) { alert('Rule text cannot be empty -- use Delete instead.'); return; }
+  const full = $('rs-text').value;
+  if (!full.includes(row.line)) {
+    $('rs-out').textContent = '✗ Could not find the original line to replace (the ruleset changed under you) -- Reload from disk and try again.';
+    rsRenderFromText();
+    return;
+  }
+  $('rs-text').value = full.replace(row.line, newLine);
+  const d = await apiPost('/api/rules/suricata', { rules: $('rs-text').value });
+  $('rs-out').textContent = d.ok ? `✓ sid ${row.sid} updated and live.` : '✗ ' + d.output;
+  showToast(`Edit sid ${row.sid}: ${d.ok ? 'done' : 'FAILED'}`, d.ok ? 'success' : 'critical');
   await rsReload();
 }
 
@@ -409,6 +490,7 @@ async function quickApplySuricata(best) {
     ta.value = ta.value.replace(/\s*$/, '\n') + `# auto-added ${new Date().toISOString().slice(0, 19)} from event quickblock\n${d.rule}\n`;
   }
   const ap = await apiPost('/api/rules/suricata', { rules: ta.value });
+  if (ap.ok) await rsReload(); else rsRenderFromText();
   return { ok: ap.ok, msg: ap.ok ? `✓ Suricata sid ${d.sid} is now alerting.` : '✗ Suricata apply: ' + ap.output };
 }
 
@@ -502,9 +584,11 @@ function libMerge() {
     const m = l.match(/^\s*alert\b.*sid\s*:\s*(\d+)/);
     return m && !have.has(m[1]);
   });
-  if (fresh.length)
+  if (fresh.length) {
     $('rs-text').value = $('rs-text').value.replace(/\s*$/, '\n') +
       `# added ${new Date().toISOString().slice(0, 19)} from rule library (${$('lib-file').value})\n` + fresh.join('\n') + '\n';
+    rsRenderFromText();
+  }
   return fresh.length;
 }
 
@@ -558,8 +642,15 @@ function initRules() {
 
   $('rs-reload').onclick = rsReload;
   $('rs-rows').addEventListener('click', ev => {
-    const b = ev.target.closest('[data-rs-del]'); if (b) rsDeleteSid(b.dataset.rsDel);
+    let b = ev.target.closest('[data-rs-del]'); if (b) { rsDeleteSid(b.dataset.rsDel); return; }
+    b = ev.target.closest('[data-rs-edit]'); if (b) { rsStartEdit(+b.dataset.rsEdit); return; }
+    b = ev.target.closest('[data-rs-save]'); if (b) { rsSaveEdit(+b.dataset.rsSave); return; }
+    b = ev.target.closest('[data-rs-cancel]'); if (b) { rsRenderFromText(); return; }
+    b = ev.target.closest('[data-rs-remove]'); if (b) { rsRemoveDraft(+b.dataset.rsRemove); return; }
   });
+  // Keep the table in sync with hand-edits in the raw textarea too (Reload
+  // from disk already happens below for every server round-trip).
+  $('rs-text').addEventListener('input', rsRenderFromText);
   $('lib-file').onchange = libShow;
   $('lib-test').onclick = e => suTest(e.target, $('lib-text').value, 'lib-out');
   $('lib-add').onclick = async () => {
@@ -578,6 +669,7 @@ function initRules() {
     showResult(out, d);
     out.textContent = (d.ok ? `✓ ${n} rule(s) added and live.\n\n` : `✗ Not applied (live ruleset unchanged).\n\n`) + out.textContent;
     showToast(d.ok ? `Library: ${n} rules live` : 'Library apply rejected — see output', d.ok ? 'success' : 'critical');
+    if (d.ok) await rsReload(); else rsRenderFromText();
   });
   };
   $('rs-test').onclick = e => suTest(e.target, $('rs-text').value, 'rs-out');
@@ -585,13 +677,14 @@ function initRules() {
     const d = await apiPost('/api/rules/suricata', { rules: $('rs-text').value });
     showResult(out, d);
     showToast(d.ok ? 'Suricata rules applied' : 'Rules rejected — see output', d.ok ? 'success' : 'critical');
+    if (d.ok) await rsReload(); else rsRenderFromText();
   });
   $('rs-rollback').onclick = e => {
     if (!confirm('Restore the previous Suricata ruleset?')) return;
     withBusy(e.target, 'rs-out', 'Rolling back...', async out => {
       const d = await apiPost('/api/rules/suricata/rollback');
       showResult(out, d);
-      if (d.rules) $('rs-text').value = d.rules;
+      await rsReload();   // re-fetch from disk rather than trust d.rules, so timestamps/live-set stay accurate
     });
   };
   $('cf-load').onclick = e => withBusy(e.target, 'cf-out', 'Loading from vulnbox...', async () => { await cfLoad(); });

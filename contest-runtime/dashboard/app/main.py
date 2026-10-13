@@ -19,6 +19,21 @@ app = FastAPI(title="CTF Monitor Dashboard", docs_url=None, redoc_url=None)
 for module in (live, status, events, rules, services, tulip, applied, hunt):
     app.include_router(module.router)
 
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """Force the browser to always revalidate (conditional GET, still fast --
+    a 304 when unchanged) instead of silently serving a stale cached copy of
+    a JS/CSS file after we rebuild the image. StaticFiles already sends
+    Last-Modified/ETag; this just stops the browser from skipping that check.
+    Without this, "I don't see my changes" after a rebuild is a real,
+    recurring failure mode, not a one-off -- fix the root cause once here."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 

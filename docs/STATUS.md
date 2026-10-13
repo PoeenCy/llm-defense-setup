@@ -827,3 +827,45 @@ not removed -- still needed for pasting/writing rules by hand).
 real delete endpoint, confirmed the rule count returned to 17, the sid was gone from `parsed`,
 and the Redis hash field was cleaned up (`HGET suricata_rule_added 1000099` -> empty). Confirmed
 `index.html`/`rules.js` serve the new table markup over HTTP.
+
+
+---
+
+## 2026-10-13 (later still, once more again) — fixed staged/draft rules invisible in the new table
+
+User reported that after adding a rule through the UI (Generate -> Add to ruleset) it didn't
+show up in the new structured table at all -- "cái này gọi ảo sao" (feels fake/broken). Root
+cause: the table only ever repopulated from `rsReload()` (a GET of the live, already-applied
+file), but adding a rule only mutated the raw `#rs-text` textarea -- a staged edit the table had
+no way to see until *after* Apply. So a freshly generated rule looked like it vanished, when it
+was really just sitting unapplied in the textarea the whole time.
+
+**Fix**: the table is now always derived client-side from the current `#rs-text` content
+(`rsParseLocal()` / `rsRenderFromText()`), not only from the server. It tracks which sids are
+actually live (`rsLiveSids`, from the last successful `rsReload()`) vs only staged in the
+textarea. Live rows get Edit + Delete; staged/unapplied rows get a "Remove draft" button
+(strips the line locally, no server call) and show "not applied yet" instead of a timestamp.
+Added inline Edit (`rsStartEdit`/`rsSaveEdit`): replaces the message cell with a textarea,
+Save does a find-and-replace of that exact line inside the full text, POSTs apply, reloads.
+Wired a live-render call into every code path that touches `rs-text.value` so the table never
+goes stale again: `suAddToRuleset()`, `libMerge()`, the Apply/Rollback/Library-apply button
+handlers, `quickApplySuricata()` (EVENTS tab quick-action), and a plain `input` listener on
+`#rs-text` for manual typing.
+
+**Verified live, end-to-end** against the real API (add -> apply -> edit -> delete):
+posted a new rule (sid 1000098), confirmed it came back in `parsed` with a timestamp; replaced
+its message text and re-applied, confirmed the row updated (`CLAUDE_EDIT_TEST` ->
+`CLAUDE_EDIT_TEST_V2`) while **keeping the original `added` timestamp** (edit does not reset
+first-seen time); deleted it, confirmed it's gone from `parsed` and the rule count is back to
+17. Also cleaned up 7 leftover LFI library rules (sid 9207001-9207007) that had been added
+through `libMerge()` during an earlier test in this same session and never removed -- deleted
+through the real delete endpoint (not a direct file edit) so Suricata's live-reloaded state and
+the file stay consistent, confirmed count is back to the original 17.
+
+Also fixed a separate, recurring complaint (reported twice before this session) that new
+dashboard features didn't appear after a rebuild -- root cause was the browser caching
+`/static/*` JS even across a fresh image build. Added middleware in `main.py` that sends
+`Cache-Control: no-cache` on every `/static/*` response (StaticFiles already sends
+ETag/Last-Modified, so the browser still gets a fast 304 when nothing changed -- it just can no
+longer skip the revalidation check and silently serve a stale cached copy). Verified via
+`curl -sI .../static/js/rules.js` showing the header present after a rebuild.
