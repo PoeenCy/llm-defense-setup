@@ -47,18 +47,15 @@ flowchart TD
 
     subgraph host ["Monitor host — one machine"]
         Proxy["ctf_proxy edge\n(nginx + Python filters)"]
-        Vulnbox["mock-vulnbox\n(or your real services)"]
+        Vulnbox["your real service\n(mock-vulnbox for rehearsal)"]
 
         Suricata["Suricata\n(rule-based IDS)"]
         Tulip["Tulip\n(TimescaleDB flow store)"]
         Detection["detection service\n(flag-out regex, <2s)"]
 
-        MCP["mcp-tulip\n(read-only MCP server)"]
-        IOCBrain["ioc-brain\n(FastAPI)"]
-        LLM["Foundation-Sec-8B\n(Ollama, load-on-demand)"]
-
         Watchdog["watchdog\n(SLA poller)"]
         Dashboard["dashboard\n(WebSocket UI)"]
+        MLFP["ml-fingerprint\n(sklearn, prep-only, off by default)"]
     end
 
     Attacker -->|exploit attempt| Proxy
@@ -69,19 +66,18 @@ flowchart TD
     Vulnbox -.->|pcap| Suricata
     Vulnbox -.->|pcap| Tulip
     Vulnbox -.->|pcap| Detection
+    Vulnbox -.->|pcap, MODE=prep only| MLFP
 
     Suricata --> Detection
-    Tulip <--> MCP
-    MCP <--> IOCBrain
-    IOCBrain <--> LLM
 
     Watchdog -.->|TCP probe| Proxy
     Detection --> Dashboard
     Watchdog --> Dashboard
-    IOCBrain --> Dashboard
+    MLFP -.->|hints only| Dashboard
 ```
 
-Three layers:
+No LLM / generative-AI path exists anywhere in this repo (removed by explicit decision — see
+`docs/STATUS.md`). Two layers do the actual work, plus an optional non-generative hint layer:
 
 1. **Edge mitigation** — [`ctf_proxy`](https://github.com/ByteLeMani/ctf_proxy) (a real
    upstream project, not reinvented) sits in front of your services. Python filter modules
@@ -92,10 +88,10 @@ Three layers:
    assembles flows into TimescaleDB/Postgres; Suricata does signature-based IDS; a small
    `detection` service regex-scans for your flag format and ingests Suricata alerts, both
    landing on the dashboard in under a second.
-3. **Analysis** — an LLM ([Foundation-Sec-8B](https://huggingface.co/fdtn-ai/Foundation-Sec-8B),
-   Cisco's security-tuned Llama-3.1-8B) reads real flow data through `mcp-tulip`, an MCP
-   server whose Postgres role is `GRANT SELECT`-only — a write attempt is rejected by the
-   database itself, not by convention.
+3. **Optional bot-deviation hints** (`MODE=prep` only, off by default) — `ml-fingerprint` is
+   sklearn DBSCAN clustering over L3/L4 traffic cadence, not a model you train or an LLM — it
+   flags connections that look unlike the organizer's checker bot. Hints only, never auto-acts,
+   and has no effect at all under `MODE=contest` regardless of its config flag.
 
 ## Quick start
 
@@ -104,18 +100,21 @@ git clone <this-repo>
 cd Setup_tool
 
 # Edit vulnbox IP, flag regex, service ports, ctf_proxy keyword, etc.
-nano services.json
-bash validate-config.sh
+nano contest-runtime/config/services.json
+bash contest-runtime/config/validate-config.sh
 
-# Pull images/models once (needs internet; ~20-40 min)
+# Pull images once (needs internet; ~10-20 min)
 bash pull-and-save.sh
 
-# Bring everything up — generates every tool's config from services.json first
-bash bringup.sh
+# Bring everything up — generates every tool's config from services.json first,
+# runs a preflight check (docker/docker-compose/python3/redis), then starts
+# only contest-runtime/ (MODE=contest) — nothing prep-only ever starts
+MODE=contest bash deploy-all.sh
 ```
 
 Open the dashboard at `http://localhost:8080`. Full walkthrough, troubleshooting, and the
-air-gapped restore path are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+air-gapped restore path are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md). Need to change something
+mid-competition? [`CONFIG.md`](CONFIG.md), not this file.
 
 **Verify the edge-mitigation loop works** (legit traffic passes, an attack gets blocked, SLA
 stays green):
@@ -126,12 +125,13 @@ cd offline-bundle/repos/ctf_proxy && python3 harness.py
 
 ## One config, every tool
 
-`services.json` is the single source of truth. `generators/*.py` turn it into each tool's
-native config (`.env` for Tulip, `config.json` for `ctf_proxy`, ...) — `bringup.sh` always
-regenerates before starting anything, so a one-line config change (a port, the vulnbox IP,
-the `ctf_proxy` keyword) propagates everywhere with no manual edits. `validate-config.sh`
-checks required fields and that `ctf_proxy`'s generated keyword hasn't drifted from
-`services.json`'s. Full field reference: [`docs/SCHEMA.md`](docs/SCHEMA.md).
+`contest-runtime/config/services.json` is the single source of truth.
+`contest-runtime/config/generators/*.py` turn it into each tool's native config (`.env` for
+Tulip, `config.json` for `ctf_proxy`, ...) — `bringup.sh` always regenerates before starting
+anything, so a one-line config change (a port, the vulnbox IP, the `ctf_proxy` keyword)
+propagates everywhere with no manual edits. `validate-config.sh` checks required fields and
+that `ctf_proxy`'s generated keyword hasn't drifted from `services.json`'s. Full field
+reference: [`docs/SCHEMA.md`](docs/SCHEMA.md).
 
 ## What's actually verified
 
@@ -143,20 +143,23 @@ bugs found along the way) and what's still a known rough edge.
 
 | Path | What it is |
 |---|---|
-| `services.json` | Single source of truth — edit this |
-| `generators/` | `services.json` → each tool's native config |
-| `detection/` | Flag-out regex scanner, honeytoken collector, Suricata alert ingester |
-| `mcp-tulip/` | MCP server — read-only Postgres access to Tulip's flow DB |
-| `ioc-brain/` | LLM-backed IOC analysis API |
-| `ml-fingerprint/` | Unsupervised (DBSCAN) bot-vs-attacker traffic fingerprinting |
-| `watchdog/` | SLA health-check poller |
-| `dashboard/` | Real-time alert UI |
-| `mock-vulnbox/` | Toy vulnerable services for single-machine testing |
-| `vulnbox-deploy/` | Scripts to deploy capture/watchdog/honeytoken onto a *real* vulnbox |
+| `contest-runtime/` | Everything allowed to run during the 8h contest (`MODE=contest`) |
+| `contest-runtime/config/` | `services.json` (single source of truth) + `validate-config.sh` + `generators/` |
+| `contest-runtime/detection/` | Flag-out regex scanner, honeytoken collector, Suricata ruleset |
+| `contest-runtime/watchdog/` | SLA health-check poller + OS-watchdog deploy scripts |
+| `contest-runtime/monitor/` | Vulnbox traffic-capture deploy scripts |
+| `contest-runtime/defense/` | ctf_proxy deploy script + block-rule templates |
+| `contest-runtime/dashboard/` | Real-time alert UI (FastAPI + plain JS, no build step) |
+| `contest-runtime/hostagent/` + `host_agent.py` | Host-side process that executes Dashboard-requested changes (whitelisted actions only) |
+| `prep-only/` | **Never started under `MODE=contest`** — home/practice fixtures only |
+| `prep-only/ml-classifier/` | Optional sklearn (DBSCAN) bot-fingerprint hint layer, off by default |
+| `prep-only/training/mock-vulnbox/` | Toy vulnerable services for rehearsal before competition day |
+| `docker-compose.contest.yml` / `docker-compose.prep.yml` | The only two compose files; `MODE=contest` never touches the second one |
+| `bringup.sh` / `teardown.sh` / `deploy-all.sh` | Orchestration — all require `MODE=contest\|prep` |
 | `docs/` | Architecture, runbook, config schema, verified status, demo script |
 
-`offline-bundle/` (cloned upstream repos, Docker images, model blobs) is a build artifact,
-not source — it's gitignored; regenerate it with `pull-and-save.sh`.
+`offline-bundle/` (cloned upstream repos, Docker images) is a build artifact, not source — it's
+gitignored; regenerate it with `pull-and-save.sh`.
 
 ## Credits
 
@@ -164,5 +167,4 @@ Built on top of, not instead of:
 [Tulip](https://github.com/OpenAttackDefenseTools/tulip) ·
 [ctf_proxy](https://github.com/ByteLeMani/ctf_proxy) ·
 [pcap-broker](https://github.com/fox-it/pcap-broker) ·
-[Foundation-Sec-8B](https://huggingface.co/fdtn-ai/Foundation-Sec-8B) by Cisco Foundation AI ·
 [Suricata](https://suricata.io/)
