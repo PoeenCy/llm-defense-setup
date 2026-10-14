@@ -1100,3 +1100,75 @@ single-service-only). Noted but did NOT fix (out of scope -- a code question, no
 nothing in either compose file runs a local ctf_proxy container that reads it -- orphaned,
 harmless, now documented as such instead of left to look load-bearing. `docs/STATUS.md` and
 `docs/INVENTORY.md` deliberately left untouched (historical logs, not current-state docs).
+
+
+---
+
+## 2026-10-14 (later) — multi-condition AND for ctf_proxy BLOCK rules, identity-header refusal
+
+User asked a pointed question after a Q&A about the rule builder: Suricata's builder already
+supports combining multiple content conditions (a list of "matches"), but ctf_proxy's builder
+(the one that actually BLOCKS, the higher-stakes side) only ever took one target/value pair plus
+two narrow convenience flags (`only_method`/`only_path_contains`) -- asymmetric in the wrong
+direction, since blocking needs MORE precision than alerting, not less. User explicitly asked for
+at least 3 combinable conditions, and separately asked to hard-refuse anything that blocks on
+"identity" (User-Agent/IP-shared-between-attacker-and-checker), after confirming via a separate
+question that the host's own SLA watchdog is a crude TCP-connect probe from the monitor host --
+not the organizer's real SLA check -- and so would NOT catch a selectively-blocked checker
+request (ctf_proxy completes the TCP handshake regardless; only the content decision drops it),
+making precise rule-writing matter more, not less, since there's no safety net underneath it.
+
+**`rulegen/ctfproxy.py`**: `build_filter()` now accepts an optional `extra: [...]` list of further
+conditions, each validated the same way as the primary one and ANDed together via separate
+`data0`/`data1`/... variables in the generated method. Fully backward compatible -- every
+existing caller that doesn't pass `extra` behaves identically to before (verified: all 12
+pre-existing tests in `test_rulegen.py` still pass unchanged). New: a condition with
+`target: "header"` and `header_name` resolving to `user-agent` or `x-forwarded-for` is now a hard
+`errors` entry (empty `code`, rule not generated) on ANY condition, primary or extra -- not just a
+warning -- since an attacker and the checker bot routinely share both. A rule combining fewer
+than 3 total conditions gets a `warnings` entry (not blocking) nudging toward adding more.
+
+**Caught and fixed a real bug while wiring this up**: `primary = {k: spec.get(k) for k in (...)}`
+stored an explicit `None` for every field the caller didn't set, which defeats
+`cond.get("mode", "contains")`'s default (`dict.get`'s default only applies when the key is
+*absent*, not when it's present with value `None`) -- every build silently got `mode: None`,
+fell through to "unknown mode" and returned empty code. Caught immediately by the existing test
+suite (3 tests failed with `IndentationError` from execing empty generated code) before this ever
+reached a live apply. Fixed by only copying keys actually present in `spec`.
+
+**Test suite**: one existing test (`test_ctfproxy_generated_rule_behaves`) asserted that blocking
+on `header_name: "user-agent"` (sqlmap detection) was valid -- intentionally changed to a non-
+identity header, since that assumption is exactly what this change revokes. Added 3 new tests:
+identity-header refusal (primary and nested in `extra`), multi-condition AND actually requiring
+both parts of a message to match, and the too-few-conditions warning threshold. All 15 tests
+(12 original + 3 new) pass.
+
+**UI (`index.html`/`rules.js`)**: panel 3b (ctf_proxy builder) gets a "+ condition (AND)" row
+list mirroring the Suricata builder's existing pattern, each row its own target/mode/value/nocase
+with per-row show/hide of the param/header-name field. `applyPick()` ("Use selection" from a
+Tulip flow) now fills the PRIMARY condition on the first pick and appends a new AND'd row on every
+pick after that, instead of overwriting the previous selection -- lets a user build a 3-condition
+rule just by selecting three distinctive parts of the real request, no manual form-filling needed.
+Also added, prompted by the user asking specifically about raw-TCP blocking ("chặn dựa trên byte
+bên trong"): the service picked in 3b's dropdown now drives which targets are even selectable --
+for a raw-TCP service (`http: false`), every target select (primary and all extra rows) is locked
+to "the whole raw request" (hidden, not just rejected after Generate) with an inline note
+explaining why, so the server-side TCPStream/`target != "raw"` rejection path (already built and
+tested earlier this session) can never actually surface as a user-facing error during normal use.
+
+**Verified live** against the real ctf_proxy filter on `dfcd-vbox`: built a 2-condition rule
+(`path contains "/upload"` AND `body contains "<?php"`) through the real `/build`+apply+delete
+cycle -- generated code correctly ANDs `data0`/`data1`, applied cleanly (3 methods), deleted
+cleanly (back to the pre-existing 0 custom methods). Separately confirmed via a direct `curl` to
+`/api/rules/ctfproxy/build` that a `user-agent` header condition is rejected with the expected
+error text and empty `code`, over the real HTTP API (not just the unit test).
+
+**Unrelated incident noticed and handled during this same window**: the host machine itself
+rebooted (uptime reset to ~1h43m, every container exited ~22h prior at reboot time) -- not caused
+by anything in this session. Brought the whole stack back up with `MODE=contest bash
+deploy-all.sh` (took longer than the default 120s foreground timeout, finished in the background;
+confirmed all `tulip-*`/`ctf-*` containers running again before continuing). Also found and
+reverted an unrelated, unexplained one-line corruption in `detection_service.py`'s docstring
+(`"detection_service.py — ..."` → `"ban — ..."`) that showed up in `git status` right before this
+batch's commit -- not something this session's edits touched; reverted via `git checkout --` to
+the last-committed content rather than guessed at a fix, since the corruption's origin is unknown.

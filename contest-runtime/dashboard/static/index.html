@@ -287,6 +287,20 @@
           <label>Match</label><select class="sel" id="cp-mode"><option value="contains">contains</option><option value="equals">equals</option><option value="regex">regex</option></select>
           <label>Value</label><input class="inp" id="cp-value" placeholder="the malicious part">
           <label>Options</label><span><label class="chk"><input type="checkbox" id="cp-nocase" checked> ignore case</label></span>
+        </div>
+        <div class="help" style="padding:4px 8px;">A rule that blocks on just one short/generic condition is the usual way a BLOCK rule
+          ends up also catching the checker. Combine more — at least 3 total is a good target when there's no time to carefully
+          <b>Test on recent traffic</b> first.</div>
+        <div class="help" id="cp-raw-note" style="padding:4px 8px;color:var(--accent-cyan);" hidden>
+          Service "<span id="cp-raw-note-svc"></span>" is raw TCP, not HTTP — there's no parsed URL/param/header to
+          read, only the raw bytes of the message. Every condition below is locked to "the whole raw request" and
+          matches on byte content.
+        </div>
+        <div id="cp-extra"></div>
+        <div class="row-actions">
+          <button class="btn" id="cp-addmatch">+ condition (AND)</button>
+        </div>
+        <div class="form-grid" id="cp-http-only">
           <label>Only method</label><select class="sel" id="cp-meth"><option value="">any</option><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select>
           <label>Only if path has</label><input class="inp" id="cp-path" placeholder="optional, e.g. /login — narrows the rule">
         </div>

@@ -94,13 +94,13 @@ def test_ctfproxy_value_cannot_inject_code():
 def test_ctfproxy_generated_rule_behaves():
     class Msg:
         url = "/login?u=1"; path = "/login"; query_string = "u=1"; method = "POST"
-        headers = {"User-Agent": "sqlmap/1.7"}; parameters = {"username": "admin' OR 1=1--"}; raw_body = b"username=admin"
+        headers = {"X-Custom-Trigger": "attack123"}; parameters = {"username": "admin' OR 1=1--"}; raw_body = b"username=admin"
     class Stream:
         current_http_message = Msg(); current_message = b"POST /login HTTP/1.1"
     ns = {"HTTPStream": object}
     for spec, expected in [
         ({"target": "param", "param_name": "username", "value": "' or 1=1", "nocase": True}, True),
-        ({"target": "header", "header_name": "user-agent", "value": "sqlmap"}, True),
+        ({"target": "header", "header_name": "x-custom-trigger", "value": "attack"}, True),
         ({"target": "path", "value": "/admin"}, False),
         ({"target": "path", "value": "/login", "only_method": "GET"}, False),
         ({"target": "url", "mode": "regex", "value": r"u=\d"}, True),
@@ -108,6 +108,72 @@ def test_ctfproxy_generated_rule_behaves():
         f = ctfproxy.build_filter({"name": "t", **spec})
         exec("class M:\n" + f["code"], ns)
         assert getattr(ns["M"](), f["name"])(Stream()) is expected, spec
+
+
+def test_ctfproxy_refuses_to_block_on_identity_headers():
+    # User-Agent / X-Forwarded-For: an attacker and the checker bot routinely
+    # share these -- blocking on them is the exact mistake the project's own
+    # rule-cookbook warns about. Must be refused regardless of position
+    # (primary condition or one of the combined "extra" ones), never silently
+    # dropped from the rule.
+    for spec in [
+        {"name": "t", "target": "header", "header_name": "user-agent", "value": "sqlmap"},
+        {"name": "t", "target": "header", "header_name": "User-Agent", "value": "sqlmap"},
+        {"name": "t", "target": "header", "header_name": "x-forwarded-for", "value": "10.0.0.1"},
+        {"name": "t", "target": "path", "value": "/login",
+         "extra": [{"target": "header", "header_name": "user-agent", "value": "sqlmap"}]},
+    ]:
+        f = ctfproxy.build_filter(spec)
+        assert f["errors"], spec
+        assert any("user-agent" in e.lower() or "x-forwarded-for" in e.lower() for e in f["errors"]), f["errors"]
+        assert f["code"] == ""
+
+
+def test_ctfproxy_combines_extra_conditions_with_and():
+    class Msg:
+        url = "/upload?x=1"; path = "/upload"; query_string = "x=1"; method = "POST"
+        headers = {}; parameters = {}; raw_body = b"<?php system($_GET['c']); ?>"
+    class Stream:
+        current_http_message = Msg(); current_message = b""
+    ns = {"HTTPStream": object}
+
+    # Two conditions ANDed: path contains "/upload" AND body contains "<?php".
+    # Neither alone should fire the rule from a message missing the other half.
+    f = ctfproxy.build_filter({
+        "name": "t", "target": "path", "value": "/upload",
+        "extra": [{"target": "body", "value": "<?php"}],
+    })
+    assert not f["errors"], f["errors"]
+    exec("class M:\n" + f["code"], ns)
+    assert getattr(ns["M"](), f["name"])(Stream()) is True
+
+    class MsgWrongPath(Msg):
+        path = "/other"
+    class StreamWrongPath:
+        current_http_message = MsgWrongPath(); current_message = b""
+    assert getattr(ns["M"](), f["name"])(StreamWrongPath()) is False
+
+    # A bad "extra" condition (missing value) must surface as an error naming
+    # which condition it is, same as a bad primary condition would.
+    bad = ctfproxy.build_filter({
+        "name": "t", "target": "path", "value": "/upload",
+        "extra": [{"target": "body", "value": ""}],
+    })
+    assert bad["errors"]
+    assert any("condition 2" in e for e in bad["errors"]), bad["errors"]
+
+
+def test_ctfproxy_warns_on_too_few_conditions():
+    f = ctfproxy.build_filter({"name": "t", "target": "path", "value": "/admin/panel"})
+    assert not f["errors"]
+    assert any("1 condition" in w for w in f["warnings"]), f["warnings"]
+
+    f3 = ctfproxy.build_filter({
+        "name": "t", "target": "path", "value": "/upload",
+        "extra": [{"target": "body", "value": "<?php"}, {"target": "method", "value": "POST", "mode": "equals"}],
+    })
+    assert not f3["errors"]
+    assert not any("condition(s) combined" in w for w in f3["warnings"]), f3["warnings"]
 
 
 def test_ctfproxy_generated_rule_fails_open():

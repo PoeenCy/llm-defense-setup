@@ -169,27 +169,48 @@ function applyPick(sel, loc) {
     if (!$('su-msg').value) $('su-msg').value = `CUSTOM ${server ? 'response' : 'request'} contains ${sel.slice(0, 40)}`;
   } else {
     if (loc.direction === 'server') { $('cp-out').textContent = 'ctf_proxy rules here filter REQUESTS — pick text from the client → server part.'; return; }
-    let bareEndpoint = false;
-    if (loc.param) { $('cp-target').value = 'param'; $('cp-pname').value = loc.param; }
-    else if (loc.where === 'header' && loc.header) { $('cp-target').value = 'header'; $('cp-pname').value = loc.header; }
-    else if (loc.where === 'uri') { $('cp-target').value = 'path'; bareEndpoint = true; }
-    else if (loc.where === 'body') { $('cp-target').value = 'body'; }
-    else { $('cp-target').value = 'raw'; }
-    $('cp-value').value = sel;
-    // Only auto-fill the name while the user hasn't typed one by hand --
-    // otherwise a second pick (new target/value) would leave a stale name
-    // from the FIRST pick in place, describing something the rule no longer
-    // checks for (e.g. named after a JWT but the body now matches GraphQL).
-    if (!cpNameTouched) $('cp-name').value = (loc.param || loc.where || 'rule') + '_' + sel.replace(/\W+/g, '_').slice(0, 16);
-    cpTargetChanged();
+    let target, pname, bareEndpoint = false;
+    if (loc.param) { target = 'param'; pname = loc.param; }
+    else if (loc.where === 'header' && loc.header) { target = 'header'; pname = loc.header; }
+    else if (loc.where === 'uri') { target = 'path'; bareEndpoint = true; }
+    else if (loc.where === 'body') { target = 'body'; }
+    else { target = 'raw'; }
+    // Raw-TCP service: no parsed url/path/param/header exists server-side,
+    // only the raw bytes -- collapse whatever the flow viewer guessed back
+    // to "raw" instead of letting an invalid target reach Build and error.
+    if (cpIsRawService() && target !== 'raw') { target = 'raw'; pname = undefined; }
+
+    // First pick fills the primary condition; every pick after that becomes
+    // another AND'd condition in the "extra" list below (same pattern as the
+    // Suricata builder's "+ condition" rows) -- combining several distinctive
+    // parts of the request is what actually keeps a BLOCKING rule from also
+    // matching the checker, instead of overwriting the previous pick.
+    if (!$('cp-value').value) {
+      $('cp-target').value = target;
+      if (pname) $('cp-pname').value = pname;
+      $('cp-value').value = sel;
+      if (!cpNameTouched) $('cp-name').value = (loc.param || loc.where || 'rule') + '_' + sel.replace(/\W+/g, '_').slice(0, 16);
+      cpTargetChanged();
+    } else {
+      const rows = $('cp-extra').querySelectorAll('.match-row');
+      const empty = [...rows].find(r => !r.querySelector('.cpm-val').value);
+      if (empty) {
+        empty.querySelector('.cpm-target').value = target;
+        if (pname) empty.querySelector('.cpm-name').value = pname;
+        empty.querySelector('.cpm-val').value = sel;
+        empty._syncName();
+      } else {
+        cpAddMatchRow(target, pname, 'contains', sel);
+      }
+    }
     // The exact mistake that took down /image-sharing/ earlier: picking the
     // bare PATH (no query param, no body) blocks the whole endpoint, which
     // the checker usually also calls for legitimate reasons. Warn loudly
     // right here instead of letting it ship silently.
     $('cp-out').textContent = bareEndpoint
       ? `⚠ Bạn đang chọn PATH ("${sel}") — rule này sẽ chặn CẢ endpoint này, không chỉ phần độc hại.\n` +
-        'Nếu endpoint còn dùng cho việc hợp lệ (checker/người dùng thật), hãy chọn lại THAM SỐ hoặc nội dung body của payload tấn công thay vì path. ' +
-        'Chỉ giữ "the URL path" ở đây nếu bạn chắc endpoint này không có traffic hợp lệ nào.'
+        'Nếu endpoint còn dùng cho việc hợp lệ (checker/người dùng thật), hãy chọn lại THAM SỐ hoặc nội dung body của payload tấn công thay vì path, hoặc thêm điều kiện (+ condition) để thu hẹp lại. ' +
+        'Chỉ giữ "the URL path" làm điều kiện DUY NHẤT nếu bạn chắc endpoint này không có traffic hợp lệ nào.'
       : '';
   }
   $('fl-meta').textContent = `Selection placed into the ${currentBuilder === 'sur' ? 'Suricata' : 'ctf_proxy'} builder (detected location: ${loc.where}${loc.param ? ', param ' + loc.param : ''}${loc.header ? ', header ' + loc.header : ''}).`;
@@ -288,6 +309,102 @@ function cpTargetChanged() {
   $('cp-pname-l').textContent = t === 'header' ? 'Header name' : 'Parameter name';
 }
 
+/* The currently-picked service in panel 3b decides what the builder can even
+   offer: a raw TCP service (no HTTP parsing) only ever has bytes to match on
+   -- url/path/param/header/method targets don't exist for it server-side
+   (rulegen/ctfproxy.py rejects them). Restricting the dropdowns here means
+   that error can never actually happen -- the invalid options simply aren't
+   there to pick, instead of being generated and then rejected after Build. */
+function cpIsRawService() {
+  const info = cfServices.find(s => s.name === cfSvc());
+  return !!(info && !info.http);
+}
+
+function cpRestrictTargetSelect(sel, raw) {
+  [...sel.options].forEach(o => { o.hidden = raw && o.value !== 'raw'; });
+  if (raw && sel.value !== 'raw') sel.value = 'raw';
+}
+
+function cpApplyServiceConstraints() {
+  const raw = cpIsRawService();
+  cpRestrictTargetSelect($('cp-target'), raw);
+  cpTargetChanged();
+  document.querySelectorAll('#cp-extra .cpm-target').forEach(sel => {
+    cpRestrictTargetSelect(sel, raw);
+    sel.dispatchEvent(new Event('change'));
+  });
+  $('cp-http-only').style.display = raw ? 'none' : '';
+  $('cp-raw-note').hidden = !raw;
+  if (raw) $('cp-raw-note-svc').textContent = cfSvc();
+}
+
+/* Extra AND'd conditions beyond the primary one (mirrors Suricata's
+   "+ condition" match-row pattern) -- combining several distinctive parts
+   of the request (e.g. path AND body payload) is what keeps a BLOCKING
+   rule from also matching the checker. Backend hard-refuses target=header
+   with header_name user-agent/x-forwarded-for on ANY row, primary or extra
+   -- those are shared between attacker and checker too often to block on. */
+function cpAddMatchRow(target, name, mode, value, nocase) {
+  const row = document.createElement('div');
+  row.className = 'match-row';
+  row.innerHTML = `
+    <select class="sel cpm-target">
+      <option value="param">a parameter</option>
+      <option value="body">the raw body</option>
+      <option value="path">the URL path</option>
+      <option value="url">the full URL</option>
+      <option value="query_string">the query string</option>
+      <option value="header">a header</option>
+      <option value="method">the HTTP method</option>
+      <option value="raw">the whole raw request</option>
+    </select>
+    <input class="inp cpm-name" placeholder="parameter name" style="width:120px;display:none;">
+    <select class="sel cpm-mode"><option value="contains">contains</option><option value="equals">equals</option><option value="regex">regex</option></select>
+    <input class="inp cpm-val" placeholder="value">
+    <span style="white-space:nowrap;">
+      <label class="chk"><input type="checkbox" class="cpm-nocase"> nocase</label>
+      <button class="er-btn-sm cpm-del" title="remove">✗</button>
+    </span>`;
+  const targetSel = row.querySelector('.cpm-target');
+  const nameInput = row.querySelector('.cpm-name');
+  const syncName = () => {
+    const show = targetSel.value === 'param' || targetSel.value === 'header';
+    nameInput.style.display = show ? '' : 'none';
+    nameInput.placeholder = targetSel.value === 'header' ? 'header name' : 'parameter name';
+  };
+  targetSel.value = target || 'body';
+  nameInput.value = name || '';
+  row.querySelector('.cpm-mode').value = mode || 'contains';
+  row.querySelector('.cpm-val').value = value || '';
+  row.querySelector('.cpm-nocase').checked = !!nocase;
+  targetSel.onchange = syncName;
+  row._syncName = syncName;
+  syncName();
+  row.querySelector('.cpm-del').onclick = () => row.remove();
+  $('cp-extra').appendChild(row);
+  cpRestrictTargetSelect(targetSel, cpIsRawService());
+  syncName();
+  return row;
+}
+
+function cpSpec() {
+  const t = $('cp-target').value;
+  return {
+    name: $('cp-name').value, target: t, mode: $('cp-mode').value, value: $('cp-value').value,
+    nocase: $('cp-nocase').checked, only_method: $('cp-meth').value, only_path_contains: $('cp-path').value,
+    param_name: t === 'param' ? $('cp-pname').value : '', header_name: t === 'header' ? $('cp-pname').value : '',
+    extra: [...$('cp-extra').querySelectorAll('.match-row')].map(r => {
+      const et = r.querySelector('.cpm-target').value;
+      const ename = r.querySelector('.cpm-name').value;
+      return {
+        target: et, mode: r.querySelector('.cpm-mode').value, value: r.querySelector('.cpm-val').value,
+        nocase: r.querySelector('.cpm-nocase').checked,
+        param_name: et === 'param' ? ename : '', header_name: et === 'header' ? ename : '',
+      };
+    }),
+  };
+}
+
 async function cpBuild(btn) {
   await withBusy(btn, 'cp-out', 'Generating...', async out => {
     if (!$('cf-text').value.trim()) {
@@ -295,12 +412,7 @@ async function cpBuild(btn) {
       const ok = await cfLoad();
       if (!ok) { out.textContent = '✗ Could not load the current ctf_proxy filter (see 3b). Is ctf_proxy installed and the vulnbox reachable?'; return; }
     }
-    const t = $('cp-target').value;
-    const spec = {
-      name: $('cp-name').value, target: t, mode: $('cp-mode').value, value: $('cp-value').value,
-      nocase: $('cp-nocase').checked, only_method: $('cp-meth').value, only_path_contains: $('cp-path').value,
-      param_name: t === 'param' ? $('cp-pname').value : '', header_name: t === 'header' ? $('cp-pname').value : '',
-    };
+    const spec = cpSpec();
     const d = await apiPost('/api/rules/ctfproxy/build', { spec, source: $('cf-text').value, service: cfSvc() });
     if (d.errors && d.errors.length) { out.textContent = '✗ Fix these first:\n- ' + d.errors.join('\n- '); return; }
     $('cf-text').value = d.source;
@@ -502,6 +614,7 @@ async function cfLoadServices() {
     ? cfServices.map(s => `<option value="${escHtml(s.name)}">${escHtml(s.name)}${s.http ? '' : ' (raw TCP)'}</option>`).join('')
     : '<option value="">(no TCP service configured)</option>';
   if (cur && cfServices.some(s => s.name === cur)) $('cf-service').value = cur;
+  cpApplyServiceConstraints();
 }
 
 async function cfLoad() {
@@ -760,6 +873,7 @@ function initRules() {
     e.target.hidden = true; e.target.disabled = false;
   };
   $('cp-target').onchange = cpTargetChanged;
+  $('cp-addmatch').onclick = () => cpAddMatchRow();
   $('cp-build').onclick = e => cpBuild(e.target);
   // After a successful build the name field holds the just-generated method's
   // real name -- starting a fresh pick/build cycle should auto-name again
@@ -814,7 +928,7 @@ function initRules() {
     });
   };
   cfLoadServices();   // local config read, no SSH -- safe to do unconditionally at page load
-  $('cf-service').onchange = () => withBusy({ disabled: false, textContent: '' }, 'cf-out', 'Loading from vulnbox...', async () => { await cfLoad(); });
+  $('cf-service').onchange = () => withBusy({ disabled: false, textContent: '' }, 'cf-out', 'Loading from vulnbox...', async () => { await cfLoad(); cpApplyServiceConstraints(); });
   $('cf-load').onclick = e => withBusy(e.target, 'cf-out', 'Loading from vulnbox...', async () => { await cfLoad(); });
   $('cf-apply').onclick = e => {
     if (!confirm('Upload this filter to ctf_proxy? Rules start BLOCKING immediately (unless filtering is paused).')) return;
