@@ -32,9 +32,10 @@ async function loadEvents() {
       <td class="msg">${escHtml(e.message)}</td>
       <td style="white-space:nowrap;">
         <button class="er-btn-sm" data-act="detail" data-i="${i}">Detail</button>
+        ${e.type === 'os-watchdog' ? `<button class="er-btn-sm" data-act="oswd-allow" data-i="${i}" title="Mark this exact alert (not the whole type) as known-good -- e.g. the organizer's checker legitimately SSHing in -- so it stops repeating">✓ Known-good</button>` : `
         <button class="er-btn-sm" data-act="rule" data-i="${i}">Make rule</button>
         <button class="er-btn-sm" data-act="alert" data-i="${i}" title="Suricata only -- never blocks anything, always safe">Alert</button>
-        <button class="er-btn-sm danger" data-act="block" data-i="${i}" title="ctf_proxy -- auto-loads the flow, picks the narrowest safe match, uploads a real block. Refuses on a bare path with no parameter.">Block</button>
+        <button class="er-btn-sm danger" data-act="block" data-i="${i}" title="ctf_proxy -- auto-loads the flow, picks the narrowest safe match, uploads a real block. Refuses on a bare path with no parameter.">Block</button>`}
       </td>
     </tr>`;
   }).join('');
@@ -106,6 +107,25 @@ async function quickBlockClicked(btn, e) {
   else { showTab('rules'); rulesPrefillFromEvent(e); }   // refused -- land them on the manual builder instead
 }
 
+/* A one-time baseline diff can't tell "the checker legitimately SSH'd in"
+   from "an attacker did" -- both just look like "not in baseline" to it.
+   This marks the EXACT (alert_type, detail text) a human just looked at and
+   recognized as known-good, so os-watchdog-agent.sh stops re-reporting that
+   specific thing every CHECK_INTERVAL. Any different/new alert still fires. */
+async function markOswdKnownGood(e) {
+  const alertType = (e.raw && e.raw.alert_type) || '';
+  const suggested = (e.raw && e.raw.detail) || e.message || '';
+  if (!alertType) { showToast('No alert_type on this event -- cannot allowlist it', 'critical'); return; }
+  const pattern = prompt(
+    `Mark "${alertType}" alerts matching this text as known-good (e.g. the organizer's checker) -- edit down to just the stable/recurring part if this exact text won't repeat verbatim:`,
+    suggested
+  );
+  if (pattern === null) return;
+  if (!pattern.trim()) { showToast('Empty pattern -- not added', 'critical'); return; }
+  const d = await apiPost('/api/oswatchdog/allow', { alert_type: alertType, pattern: pattern.trim() });
+  showToast(d.ok ? `✓ Allowlisted [${alertType}]` : '✗ ' + d.output, d.ok ? 'success' : 'critical');
+}
+
 function initEvents() {
   $('ev-search').onclick = loadEvents;
   $('ev-q').addEventListener('keydown', ev => { if (ev.key === 'Enter') loadEvents(); });
@@ -119,6 +139,7 @@ function initEvents() {
     if (b.dataset.act === 'rule') { showTab('rules'); rulesPrefillFromEvent(e); }
     if (b.dataset.act === 'alert') quickAlertClicked(b, e);
     if (b.dataset.act === 'block') quickBlockClicked(b, e);
+    if (b.dataset.act === 'oswd-allow') markOswdKnownGood(e);
   });
   setInterval(() => {
     if (currentTab === 'events' && $('ev-auto').checked) loadEvents();

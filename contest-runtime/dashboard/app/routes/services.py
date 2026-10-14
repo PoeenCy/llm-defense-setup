@@ -88,3 +88,22 @@ async def firewall_content_op(op: str, body: dict):
         return {"ok": False, "output": "op must be block or unblock"}
     return await run_op(f"firewall_content_{op}",
                         {"pattern": body.get("pattern", ""), "port": body.get("port")}, wait_s=40)
+
+
+# ── OS-watchdog allowlist — mark a specific (alert type, detail substring)
+#    as known-good (e.g. the organizer's checker legitimately exec'ing in to
+#    plant/verify a flag) so the baseline-diff watchdog stops re-reporting
+#    exactly that, without silencing any other/new kind of alert. ──
+@router.get("/api/oswatchdog/allowlist")
+async def oswatchdog_allowlist():
+    return await run_op("oswatchdog_list_allowed", wait_s=20)
+
+
+@router.post("/api/oswatchdog/allow")
+async def oswatchdog_allow(body: dict):
+    return await run_op("oswatchdog_allow", {"alert_type": body.get("alert_type", ""), "pattern": body.get("pattern", "")}, wait_s=20)
+
+
+@router.post("/api/oswatchdog/unallow")
+async def oswatchdog_unallow(body: dict):
+    return await run_op("oswatchdog_unallow", {"alert_type": body.get("alert_type", ""), "pattern": body.get("pattern", "")}, wait_s=20)

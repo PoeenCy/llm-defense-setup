@@ -18,6 +18,15 @@ REPORT_URL="http://${MONITOR_IP}:${MONITOR_PORT}/watchdog/os-report"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-/var/ctf-watchdog}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
 BASELINE="${SNAPSHOT_DIR}/baseline"
+# One-time baseline diff can't tell the organizer's checker legitimately
+# SSHing in to plant/verify a flag apart from a real intrusion -- both just
+# look like "something not in baseline". Rather than guess at the checker's
+# exact process/cron/IP signature in advance (usually not published before
+# the contest), a human who sees an alert and recognizes it as the checker
+# can mark that exact (type, substring-of-detail) pair here so it stops
+# repeating every CHECK_INTERVAL -- any genuinely NEW/different alert still
+# fires normally. One line per entry: "type|pattern".
+ALLOWLIST="${SNAPSHOT_DIR}/allowlist.txt"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log()  { echo -e "[$(date +%H:%M:%S)] ${CYAN}[OS-WD]${NC} $*"; }
@@ -71,10 +80,30 @@ json_str() {
     printf '"%s"' "$s"
 }
 
+# ── Allowlist: suppress an alert type+detail a human already confirmed
+#    is the organizer's checker (or otherwise known-good), not an intrusion ──
+is_allowlisted() {
+    local type="$1" text="$2"
+    [[ -s "$ALLOWLIST" ]] || return 1
+    local a_type a_pattern
+    while IFS='|' read -r a_type a_pattern; do
+        [[ -z "$a_type" ]] && continue
+        if [[ "$a_type" == "$type" && -n "$a_pattern" && "$text" == *"$a_pattern"* ]]; then
+            return 0
+        fi
+    done < "$ALLOWLIST"
+    return 1
+}
+
 send_alert() {
     local type="$1"
     local message="$2"
     local detail="${3:-}"
+
+    if is_allowlisted "$type" "${message} ${detail}"; then
+        log "[$type] suppressed (allowlisted, not reported to monitor): $message"
+        return 0
+    fi
 
     local payload="{\"type\":\"os-watchdog\",\"alert_type\":$(json_str "$type"),\"message\":$(json_str "$message"),\"detail\":$(json_str "$detail"),\"vulnbox\":$(json_str "$(hostname)")}"
 
@@ -220,10 +249,36 @@ run_diff() {
     done
 }
 
+# ── Allowlist management (called remotely via SSH by host_agent) ──────
+allow_add() {
+    local a_type="${1:?usage: $0 allow <type> <pattern>}"
+    local a_pattern="${2:?usage: $0 allow <type> <pattern>}"
+    # '|' is the field separator and newlines would break the one-entry-per-
+    # line format -- neither is meaningful to keep in a match pattern anyway.
+    a_type="${a_type//$'\n'/ }"; a_type="${a_type//|/_}"
+    a_pattern="${a_pattern//$'\n'/ }"; a_pattern="${a_pattern//|/_}"
+    touch "$ALLOWLIST"
+    echo "${a_type}|${a_pattern}" >> "$ALLOWLIST"
+    log "Allowlisted: [$a_type] $a_pattern"
+}
+
+allow_remove() {
+    local a_type="${1:?usage: $0 unallow <type> <pattern>}"
+    local a_pattern="${2:?usage: $0 unallow <type> <pattern>}"
+    [[ -f "$ALLOWLIST" ]] || return 0
+    local tmp="${ALLOWLIST}.tmp"
+    grep -vF "${a_type}|${a_pattern}" "$ALLOWLIST" > "$tmp" || true
+    mv "$tmp" "$ALLOWLIST"
+    log "Removed from allowlist: [$a_type] $a_pattern"
+}
+
 # ── Main ──────────────────────────────────────────────────────
 case "${1:-run}" in
-    snapshot) create_snapshot ;;
-    diff)     run_diff ;;
+    snapshot)    create_snapshot ;;
+    diff)        run_diff ;;
+    allow)       allow_add "${2:-}" "${3:-}" ;;
+    unallow)     allow_remove "${2:-}" "${3:-}" ;;
+    allow-list)  cat "$ALLOWLIST" 2>/dev/null || true ;;
     run)
         # Create snapshot if none exists
         [[ -f "$BASELINE/processes.txt" ]] || create_snapshot
@@ -245,7 +300,7 @@ case "${1:-run}" in
         done
         ;;
     *)
-        echo "Usage: $0 {run|snapshot|diff}"
+        echo "Usage: $0 {run|snapshot|diff|allow <type> <pattern>|unallow <type> <pattern>|allow-list}"
         exit 1
         ;;
 esac

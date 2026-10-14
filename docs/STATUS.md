@@ -1219,3 +1219,57 @@ worked" pass, and a 3-chunk case reassembles in the correct chronological order 
 HTTP-mode services are unaffected (no `previous_messages` in the generated code); no real raw-TCP
 service exists in the current environment's `services.json` to exercise this specific fix through
 a live ctf_proxy deployment, so that last-mile verification is still only at the unit-test level.
+
+
+---
+
+## 2026-10-14 (later still, once more) — OS-watchdog "known-good" allowlist
+
+User raised a scenario none of the detection/blocking work so far addresses: during the real
+contest, the organizer's checker may have legitimate SSH/exec access to the vulnbox itself (to
+plant/verify flags) -- not just normal network traffic. Confirmed via AskUserQuestion which
+reading was meant (checker has legitimate vulnbox access, not "other teams' attack bots are part
+of the game" -- the other plausible reading). Read `contest-runtime/watchdog/os-watchdog-agent.sh`
+to confirm exactly how it works before proposing anything: it's a ONE-TIME baseline snapshot
+(processes/cron/authorized_keys/binary hashes/SUID files/etc_hashes) taken once at deploy, diffed
+every `CHECK_INTERVAL` (10s) forever after -- so the checker's own legitimate exec access would
+alert identically to a real intrusion, with no way to tell them apart, and (separately) the
+baseline never refreshes so even the SERVICE's own normal process churn would alert forever.
+
+Rather than require pre-known checker signatures (organizers usually don't publish exactly how
+their checker authenticates before the contest), built an acknowledge-based mechanism: a human
+who sees an alert and recognizes it (not guesses) marks that EXACT (alert type, detail substring)
+pair as known-good, and only that specific thing stops repeating -- any new/different alert still
+fires normally, and nothing is pre-seeded or guessed.
+
+**`os-watchdog-agent.sh`**: new `ALLOWLIST` file (`$SNAPSHOT_DIR/allowlist.txt`, one
+`type|pattern` per line), `is_allowlisted()` checked inside `send_alert()` before every report
+(suppressed alerts are still logged locally, just never POSTed to the monitor), and three new
+subcommands: `allow <type> <pattern>` (append), `unallow <type> <pattern>` (remove, exact match),
+`allow-list` (print). `|` and newlines stripped from both fields before storing (the one being
+the field separator, the other breaking the one-line-per-entry format) -- verified locally
+(sourced `is_allowlisted` standalone, not through a live agent) that a matching (type, substring)
+pair is suppressed, a different detail text under the same type is NOT, and a different type
+entirely is NOT, before touching anything remote.
+
+**`hostagent/actions/oswatchdog.py`** (new): `allow`/`unallow`/`list_allowed`, all SSH to
+`vulnbox.capture_ssh_alias` and `sudo` the agent binary (same precondition the agent itself
+already needs to read `/proc`/crontabs/`/etc` as root) -- registered in the action whitelist.
+**Routes** (`routes/services.py`): `GET /api/oswatchdog/allowlist`, `POST /api/oswatchdog/allow`,
+`POST /api/oswatchdog/unallow`.
+
+**UI**: EVENTS tab rows with `type === 'os-watchdog'` get a "✓ Known-good" button in place of the
+Make-rule/Alert/Block buttons (those don't apply to this event type) -- pre-fills a `prompt()`
+with the alert's own `detail` text, editable (since the exact text may include a one-off detail
+like a PID that won't repeat verbatim; narrowing to the stable substring is the user's call, not
+automated). SERVICES tab gets a new panel listing/removing current allowlist entries (undo for a
+mistaken or too-broad allow).
+
+**Verified live** against the real `dfcd-vbox`: the already-deployed agent on the vulnbox was the
+OLD version (pre-dating this change) and correctly rejected the new subcommands with its old
+usage string -- re-ran `deploy-os-watchdog.sh` to push the updated script (confirmed this doesn't
+require re-deploying anything else; the systemd unit restarts the same binary path), then ran the
+full allow → list → unallow → list cycle through the real dashboard API end-to-end: entry
+appeared after `allow`, was gone after `unallow`, matching the real file on the vulnbox the whole
+time (not a mock). All 16 `test_rulegen.py` tests and `validate-config.sh` still pass (neither
+touches this watchdog-side change, checked anyway since both run in under a few seconds).

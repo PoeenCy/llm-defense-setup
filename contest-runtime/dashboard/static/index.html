@@ -431,6 +431,17 @@
     <div class="er-table-wrap"><table class="er-table"><thead><tr><th>Chuỗi đang bị chặn (CTFBLOCK_CONTENT)</th><th>Port</th><th></th></tr></thead>
       <tbody id="fwc-body"><tr><td colspan="3" class="er-empty">Chưa tải — bấm Refresh list.</td></tr></tbody></table></div>
   </div>
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title"><span>✓</span> OS-watchdog — known-good allowlist</div>
+      <button class="btn" id="oswd-refresh">Refresh list</button></div>
+    <div class="help">OS-watchdog so sánh với 1 bản chụp ban đầu (baseline) — bất cứ thứ gì khác đi (process mới, cron mới...)
+      đều báo alert, kể cả hành vi <b>hợp lệ</b> của checker/BTC nếu họ SSH/exec vào vulnbox để đặt/kiểm tra flag.
+      Không biết trước checker dùng gì, nên cách làm: khi thấy 1 alert và nhận ra đó là checker (không phải tấn công) —
+      bấm nút <b>"✓ Known-good"</b> ngay trên alert đó ở tab EVENTS — nó sẽ không báo lại đúng việc đó nữa. Danh sách dưới
+      đây để xem lại / xoá bớt nếu lỡ đánh dấu nhầm.</div>
+    <div class="er-table-wrap"><table class="er-table"><thead><tr><th>Loại alert</th><th>Chuỗi được bỏ qua</th><th></th></tr></thead>
+      <tbody id="oswd-body"><tr><td colspan="3" class="er-empty">Chưa tải — bấm Refresh list.</td></tr></tbody></table></div>
+  </div>
 </section>
 
 <!-- ══ TAB: CONFIG ══════════════════════════════════════════════ -->

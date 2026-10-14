@@ -78,6 +78,23 @@ function fwcDo(op, pattern, port) {
   });
 }
 
+async function oswdLoad() {
+  const d = await apiGet('/api/oswatchdog/allowlist');
+  if (!d.ok) { $('oswd-body').innerHTML = `<tr><td colspan="3" class="er-empty">✗ ${escHtml(d.output || 'failed')}</td></tr>`; return; }
+  $('oswd-body').innerHTML = (d.entries && d.entries.length)
+    ? d.entries.map(x => `<tr><td>${escHtml(x.alert_type)}</td><td class="msg">${escHtml(x.pattern)}</td>` +
+        `<td><button class="er-btn-sm danger" data-oswd-un="${escHtml(x.alert_type)}" data-oswd-pattern="${escHtml(x.pattern)}">Xóa</button></td></tr>`).join('')
+    : '<tr><td colspan="3" class="er-empty">Chưa đánh dấu gì — bấm "✓ Known-good" trên alert os-watchdog ở tab EVENTS.</td></tr>';
+}
+
+function oswdUnallow(alertType, pattern) {
+  if (!confirm(`Bỏ đánh dấu known-good cho [${alertType}] "${pattern.slice(0, 60)}"? Alert loại này sẽ báo lại từ lần tới.`)) return;
+  apiPost('/api/oswatchdog/unallow', { alert_type: alertType, pattern }).then(d => {
+    showToast(d.ok ? 'Đã xóa khỏi allowlist' : '✗ ' + d.output, d.ok ? 'success' : 'critical');
+    oswdLoad();
+  });
+}
+
 function initServices() {
   $('fw-refresh').onclick = fwLoad;
   $('fw-block').onclick = () => fwDo('block', $('fw-ip').value.trim());
@@ -90,6 +107,10 @@ function initServices() {
   $('fwc-unblock').onclick = () => fwcDo('unblock', $('fwc-pattern').value.trim(), $('fwc-port').value.trim());
   $('fwc-body').addEventListener('click', ev => {
     const b = ev.target.closest('[data-fwc-un]'); if (b) fwcDo('unblock', b.dataset.fwcUn, b.dataset.fwcPort);
+  });
+  $('oswd-refresh').onclick = oswdLoad;
+  $('oswd-body').addEventListener('click', ev => {
+    const b = ev.target.closest('[data-oswd-un]'); if (b) oswdUnallow(b.dataset.oswdUn, b.dataset.oswdPattern);
   });
   $('sv-refresh').onclick = loadServices;
   $('sv-body').addEventListener('click', ev => {
