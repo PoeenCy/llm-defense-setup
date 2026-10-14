@@ -18,6 +18,28 @@ TARGETS = {
     "raw":          "bytes(stream.current_message or b'').decode('latin-1', 'replace')",
 }
 
+# TCP has no message framing of its own -- a single recv() can hand back only
+# part of an attacker's payload (e.g. "/bin/sh" sent as two separate writes,
+# "/bi" then "n/sh"), and matching only stream.current_message would miss
+# both halves even though the full string clearly crossed the wire. ctf_proxy
+# itself already buffers the connection's recent chunks in
+# stream.previous_messages (newest-to-oldest deque, bounded by
+# max_stored_messages). Reassembling that history (oldest-first) + the
+# current chunk into one window before matching closes the simple
+# split-the-payload bypass -- raw TCP services only, never HTTP (which
+# already has its own message framing via current_http_message).
+# previous_messages mixes BOTH directions of the connection (ctf_proxy shares
+# one Stream object for in+out), so a server response that happens to sit in
+# the window can also match -- a tradeoff in favor of catching the fragmented
+# attack rather than missing it; still not real stream reassembly (an
+# attacker who interleaves writes with server replies in just the wrong way
+# could still split across the window boundary), just a materially higher
+# bar than matching one chunk alone.
+RAW_TCP_WINDOW_EXPR = (
+    "bytes(b''.join(list(stream.previous_messages)[::-1]) + "
+    "(stream.current_message or b'')).decode('latin-1', 'replace')"
+)
+
 # Headers that an attacker and the organizer's checker bot routinely share
 # (same browser/library User-Agent, same NAT'd source IP behind a proxy) --
 # blocking on these is the exact mistake the project's own rule-cookbook
@@ -107,7 +129,11 @@ def build_filter(spec: dict, source: str = "", stream_type: str = "http") -> dic
     "tcp" for a raw/non-HTTP service -- there is no parsed message to pull
     url/path/method/param/header from, only the raw bytes of the current
     message, so "tcp" only accepts target="raw" on every condition and
-    ignores only_method/only_path_contains (those need HTTP parsing too)."""
+    ignores only_method/only_path_contains (those need HTTP parsing too).
+    For "tcp", the generated code matches against the connection's recent
+    message history reassembled with the current chunk (see
+    RAW_TCP_WINDOW_EXPR), not current_message alone -- otherwise a payload
+    split across two TCP writes could slip past a plain "contains" check."""
     errors: list[str] = []
     warnings: list[str] = []
     # Only copy keys the caller actually set -- a dict comprehension over the
@@ -155,7 +181,7 @@ def build_filter(spec: dict, source: str = "", stream_type: str = "http") -> dic
         mode = cond.get("mode", "contains")
         value = cond.get("value") or ""
         nocase = bool(cond.get("nocase"))
-        data_expr = TARGETS["raw"] if stream_type == "tcp" else _data_expr(cond)
+        data_expr = RAW_TCP_WINDOW_EXPR if stream_type == "tcp" else _data_expr(cond)
         var = f"data{i}"
         data_lines.append(f"            {var} = {data_expr}")
         if mode == "regex":

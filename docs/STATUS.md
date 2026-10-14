@@ -1172,3 +1172,50 @@ reverted an unrelated, unexplained one-line corruption in `detection_service.py`
 (`"detection_service.py — ..."` → `"ban — ..."`) that showed up in `git status` right before this
 batch's commit -- not something this session's edits touched; reverted via `git checkout --` to
 the last-committed content rather than guessed at a fix, since the corruption's origin is unknown.
+
+
+---
+
+## 2026-10-14 (later still) — raw-TCP payload-fragmentation fix
+
+User pushed back on the earlier raw-TCP explanation, asking for the actual mechanics (what's
+being scanned, how TCP itself works, whether TCP/UDP blocking had been researched at all) rather
+than a surface-level summary. Gave a from-first-principles answer: TCP is a connectionless-at-
+the-byte-level stream with no message framing of its own (handshake/ordering/retransmission all
+handled transparently by the OS kernel before any filter code runs); ctf_proxy is a full
+relaying proxy (opens its own separate backend connection, forwards each `recv()` chunk through
+the filter, drops the connection on a match) -- so "scanning TCP" here means scanning whatever
+one `recv()` call happened to return, not packets/headers/sequence numbers. Flagged the resulting
+weakness unprompted: a payload split across two writes (`/bi` + `n/sh`) would be checked as two
+separate, incomplete chunks and could evade a plain `"/bin/sh" in current_message` check -- a
+real evasion technique, not hypothetical. Also explained UDP is architecturally untouched by any
+of this: ctf_proxy (upstream) has no UDP code path at all (confirmed from its own source/README
+earlier this session), so the only UDP block path in this repo is the already-existing iptables
+`--string` content match at the kernel/netfilter level, which has the same per-packet (not
+reassembled) limitation.
+
+User asked to patch the fragmentation weakness. Read ctf_proxy's actual `Stream`/`TCPStream`
+source (`offline-bundle/repos/ctf_proxy/proxy/src/stream.py`, `service_process.py`) rather than
+assume the API: confirmed `previous_messages` is a `deque(maxlen=max_stored_messages)` populated
+via `appendleft()` (index 0 = most-recent-previous, growing toward oldest) and that ONE `Stream`
+object is shared for BOTH directions of a connection (`in_module`/`out_module` both call
+`set_current_message` on the same object) -- so the reassembled window can include an interleaved
+server response chunk, a real but narrow tradeoff accepted in favor of catching the fragmented
+attack rather than missing it.
+
+**`rulegen/ctfproxy.py`**: new `RAW_TCP_WINDOW_EXPR` -- for `stream_type == "tcp"` ONLY (HTTP
+mode's `target: "raw"` is untouched, verified), every raw-TCP condition now matches against
+`b''.join(list(stream.previous_messages)[::-1]) + stream.current_message` (oldest-to-newest
+reassembly + current chunk) instead of `stream.current_message` alone. Purely additive for the
+non-fragmented case -- a pattern fully inside one chunk still matches, since the window always
+includes that chunk.
+
+**Test suite**: new `test_ctfproxy_raw_tcp_defeats_split_payload` -- a 2-chunk split ("/bi" +
+"n/sh") is now caught (previously would not have been, by construction of the old
+current-message-only expression), confirmed neither chunk alone would trigger a false "already
+worked" pass, and a 3-chunk case reassembles in the correct chronological order (exercising the
+`[::-1]` reversal against the real deque's newest-first order, not a guessed one). All 16 tests
+(15 prior + 1 new) pass. Live-confirmed via a direct `curl` to `/api/rules/ctfproxy/build` that
+HTTP-mode services are unaffected (no `previous_messages` in the generated code); no real raw-TCP
+service exists in the current environment's `services.json` to exercise this specific fix through
+a live ctf_proxy deployment, so that last-mile verification is still only at the unit-test level.

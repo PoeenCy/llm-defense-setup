@@ -176,6 +176,41 @@ def test_ctfproxy_warns_on_too_few_conditions():
     assert not any("condition(s) combined" in w for w in f3["warnings"]), f3["warnings"]
 
 
+def test_ctfproxy_raw_tcp_defeats_split_payload():
+    # Raw TCP has no message framing -- "/bin/sh" sent as two separate
+    # writes ("/bi" then "n/sh") must still be caught by reassembling
+    # previous_messages (newest-to-oldest, like the real ctf_proxy Stream)
+    # with current_message, not just scanning current_message alone.
+    from collections import deque
+
+    class SplitStream:
+        current_message = b"n/sh"
+        previous_messages = deque([b"/bi"], maxlen=10)   # newest-to-oldest; only one entry here
+
+    f = ctfproxy.build_filter({"name": "t", "target": "raw", "value": "/bin/sh"}, stream_type="tcp")
+    assert not f["errors"], f["errors"]
+    assert "previous_messages" in f["code"]
+    ns = {"TCPStream": object}
+    exec("class M:\n" + f["code"], ns)
+    assert getattr(ns["M"](), f["name"])(SplitStream()) is True
+
+    # Neither chunk alone contains it -- confirms this is genuinely testing
+    # reassembly, not a trivial match on current_message by itself.
+    class OnlyCurrent:
+        current_message = b"n/sh"
+        previous_messages = deque(maxlen=10)
+    assert getattr(ns["M"](), f["name"])(OnlyCurrent()) is False
+
+    # Multi-chunk history (3 fragments, in the real newest-to-oldest deque
+    # order appendleft() produces) must reassemble in the right CHRONOLOGICAL
+    # order: "/b" arrived first, then "in", then "/sh" is current -- so
+    # previous_messages is ["in", "/b"] (most-recent-previous first).
+    class ThreeChunks:
+        current_message = b"/sh"
+        previous_messages = deque([b"in", b"/b"], maxlen=10)
+    assert getattr(ns["M"](), f["name"])(ThreeChunks()) is True
+
+
 def test_ctfproxy_generated_rule_fails_open():
     class Broken:
         current_http_message = object()   # no attributes at all
