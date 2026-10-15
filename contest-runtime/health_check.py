@@ -151,8 +151,14 @@ def check_retention():
 
 
 def check_ml():
-    """ML fingerprinter publishes its own state to Redis (key ml_status)."""
+    """ML fingerprinter publishes its own state to Redis (key ml_status).
+    MODE=prep only -- never starts under MODE=contest regardless of this
+    flag (see README), so treat disabled-in-config the same way the
+    Flag-trace checks do rather than reporting a scary FAIL for a container
+    that was never supposed to be running."""
     cfg = _cfg()
+    if not cfg.get("ml_classifier", {}).get("enabled"):
+        return {"name": "ML bot fingerprint", "status": "up", "detail": "disabled in config"}
     port = cfg.get("monitor_host", {}).get("alert_queue_port", 6380)
     try:
         import redis

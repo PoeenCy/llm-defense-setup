@@ -2,6 +2,20 @@
 # vulnbox-deploy/deploy-honeytoken.sh
 # Deploy the honeytoken trap on the vulnbox.
 # Places a decoy flag in a trap location and hooks reads to notify the monitor.
+#
+# KNOWN LIMITATION, confirmed live against a real DFCD practice vulnbox (not
+# speculation): the decoy paths below (/opt/flags, /root, /etc, /tmp/.secret)
+# live on the docker HOST filesystem. On a real team-03-style compose stack
+# the actual flag is bind-mounted read-only into the *vulnerable app
+# container* only (e.g. "/flags/service-<n>:/flag:ro" on the "node"
+# service) -- an attacker who exploits the app lands inside that container,
+# not on the host, and never touches any of these host-side decoy paths.
+# These decoys still have value for catching a full container ESCAPE/host
+# compromise, but do not assume they catch an ordinary app-level flag theft.
+# A container-aware honeytoken (planted via `docker exec` into the actual
+# vulnerable service, next to or instead of the mounted flag) would be a
+# materially different and more invasive change -- not done here without
+# confirming the exact placement with whoever owns the vulnbox stack.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,25 +46,54 @@ log "  Reports to: http://$MONITOR_IP:$HONEYTOKEN_PORT/honeytoken"
 
 timeout 15 $SSH "$ALIAS" "echo SSH-OK" >/dev/null 2>&1 || skip "ssh $ALIAS unreachable (VM stopped?)"
 
+# deploy-all.sh is meant to be safe to re-run any number of times, but this
+# script used to start a brand new flag-server.sh + inotify watcher loop on
+# every run with no check for an existing one -- confirmed live: a
+# flag-server.sh from an earlier deploy was still running 3+ days later,
+# never cleaned up (same leak class as the capture tcpdump issue).
+#
+# This must NOT be `pkill -f '<pattern>'` run as part of the one big
+# deployment command below: the whole heredoc is sent as a single string,
+# so a pattern that also appears later in that same string (it always will
+# -- the pattern IS the thing we're about to start) matches the currently
+# running shell itself and kills the deploy mid-script with no output at
+# all. Confirmed live (exit 255, dies before even the next line runs) --
+# the same self-match footgun as `pkill -f` matching your own invoking
+# command line, just via "later in the same script" instead of "earlier in
+# it". Fixed with PID files + bare-numeric `kill`, each in its own separate
+# ssh call with nothing else in that call's command text to self-match.
+OLD_FS_PID=$($SSH "$ALIAS" "cat /tmp/.honeytoken-flagserver.pid 2>/dev/null" || true)
+[[ "$OLD_FS_PID" =~ ^[0-9]+$ ]] && $SSH "$ALIAS" "kill -TERM $OLD_FS_PID" 2>/dev/null || true
+OLD_WATCHER_PIDS=$($SSH "$ALIAS" "cat /tmp/.honeytoken-watchers.pid 2>/dev/null" || true)
+for p in $OLD_WATCHER_PIDS; do
+    [[ "$p" =~ ^[0-9]+$ ]] && $SSH "$ALIAS" "kill -TERM $p" 2>/dev/null || true
+done
+
 $SSH "$ALIAS" "
 set -e
 MONITOR_URL='http://${MONITOR_IP}:${HONEYTOKEN_PORT}/honeytoken'
 HONEYTOKEN='${HONEYTOKEN_FLAG}'
+> /tmp/.honeytoken-watchers.pid
 
-# Place decoy flag in several tempting locations
-mkdir -p /opt/flags /tmp/.secret /.secret 2>/dev/null || true
+# Place decoy flag in several tempting locations. These paths are root-owned
+# on a stock vulnbox (/opt, /root, /etc) -- the admin SSH user here is NOT
+# root (confirmed live: plain writes failed with Permission denied / No such
+# file or directory once mkdir silently failed too), so every write and the
+# trap-process install below need sudo -n.
+sudo -n mkdir -p /opt/flags /tmp/.secret /.secret 2>/dev/null || true
 for path in /opt/flags/flag.txt /tmp/.secret/flag /root/.bash_history_backup /etc/.hidden_flag; do
-    echo \"\$HONEYTOKEN\" > \"\$path\" 2>/dev/null || true
+    echo \"\$HONEYTOKEN\" | sudo -n tee \"\$path\" >/dev/null 2>/dev/null || true
     # inotifywait hook if available
     if command -v inotifywait &>/dev/null; then
         (
             while true; do
-                inotifywait -e access,open \"\$path\" 2>/dev/null && \
+                sudo -n inotifywait -e access,open \"\$path\" 2>/dev/null && \
                 curl -s -X POST \"\$MONITOR_URL\" \\
                      -H 'Content-Type: application/json' \\
                      -d \"{\\\"path\\\":\\\"\$path\\\",\\\"flag\\\":\\\"\$HONEYTOKEN\\\"}\" &
             done
         ) &
+        echo \$! >> /tmp/.honeytoken-watchers.pid
         disown
         echo \"Trap set on \$path (inotify)\"
     else
@@ -59,7 +102,7 @@ for path in /opt/flags/flag.txt /tmp/.secret/flag /root/.bash_history_backup /et
 done
 
 # Place a fake service response honeytoken (curl trap)
-cat > /usr/local/bin/flag-server.sh << 'FLAGEOF'
+sudo -n tee /usr/local/bin/flag-server.sh >/dev/null << 'FLAGEOF'
 #!/usr/bin/env python3
 import http.server, subprocess, urllib.request
 
@@ -84,10 +127,11 @@ class H(http.server.BaseHTTPRequestHandler):
 
 http.server.HTTPServer(('127.0.0.1', 7777), H).serve_forever()
 FLAGEOF
-chmod +x /usr/local/bin/flag-server.sh
+sudo -n chmod +x /usr/local/bin/flag-server.sh
 
 # Run as background service
 nohup python3 /usr/local/bin/flag-server.sh &>/tmp/flag-server.log &
+echo \$! > /tmp/.honeytoken-flagserver.pid
 echo \"Honeytoken HTTP trap on port 7777\"
 echo 'Deployment complete.'
 "

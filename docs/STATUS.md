@@ -1428,3 +1428,100 @@ everywhere else (APPLIED tab, delete-by-name) is AST-parsed correctly and unaffe
 **Still open before merging `integration/flagtrace` into `main`**: `MODE=prep` local regression
 pass (mock-vulnbox path) -- not run this session, lower priority since it doesn't touch the
 real vulnbox/capture path that was this session's focus.
+
+## 2026-10-15 — Full `MODE=contest bash deploy-all.sh` run against the real VPN/vulnbox; four more real bugs found and fixed, one real infra limitation confirmed and documented
+
+Ran the complete 7-step `deploy-all.sh` against the real team-03 environment (on
+`integration/flagtrace`, not yet merged to `main`) to test the whole stack end to end over the
+actual competition VPN, not just individual features. Found and fixed, in order of how they
+surfaced:
+
+**1. `services.json`'s `monitor_host.ip` was simply wrong** (`10.13.9.2`), confirmed unreachable
+even from this machine's own loopback-adjacent test (`curl http://10.13.9.2:9999` times out
+locally). This machine's actual WireGuard tunnel address, confirmed three independent ways (`ip
+addr show` on `team-03-m4`, the NetworkManager connection profile
+`/run/NetworkManager/system-connections/team-03-m4.nmconnection` showing a statically configured
+`10.13.9.34/32`, and a direct `curl` self-test succeeding against `.34` but not `.2`), is
+`10.13.9.34`. This single stale value silently broke **every** vulnbox-to-monitor push alert
+(honeytoken-out, OS-watchdog reports) -- both read the same `monitor_host.ip` field. Fixed by
+correcting the value and re-validating.
+
+**2. Even with the right IP, the vulnbox still cannot reach the monitor on port 9999 -- confirmed
+as a one-way VPN/network limitation, not a local config or firewall problem.** Evidence: (a) TCP
+itself times out (not just ICMP -- ping also fails, but a `curl` against the real honeytoken port
+times out too, ruling out "ICMP is blocked but TCP works"); (b) a brand-new, non-containerized,
+throwaway Python `http.server` bound to a fresh ephemeral port is *also* unreachable from the
+vulnbox, which rules out anything specific to the honeytoken container/port; (c) this machine's
+own `ufw` is confirmed `ENABLED=no` (`/etc/ufw/ufw.conf`), so it isn't this host's own firewall
+either. Every other path this session relies on (SSH to the vulnbox, capture pull, ctf_proxy
+deploy, OS-watchdog agent upload) is **monitor-initiated** (outbound from this machine); the only
+two mechanisms that need the **reverse** direction (vulnbox push to monitor) are honeytoken
+reporting and OS-watchdog's periodic alert push, and both are the ones found broken. Conclusion:
+this practice arena's VPN topology appears to only route monitor-to-vulnbox, not the reverse, on
+arbitrary ports -- an infrastructure property of this practice environment, not something fixable
+from this repo. **Open question for the user**: confirm whether the real SVANM 2026 contest
+network is expected to allow this reverse path; if not, honeytoken/OS-watchdog push alerts should
+be treated as a known-dead channel going into contest day, or redesigned around the
+already-proven pull model (monitor polls the vulnbox over SSH, same pattern as capture/ctf_proxy)
+instead of relying on vulnbox-initiated pushes.
+
+**3. `deploy-honeytoken.sh` had zero `sudo` anywhere**, but writes to `/opt/flags`, `/root/...`,
+`/etc/...`, and `/usr/local/bin/...` -- all root-owned on this vulnbox, and the admin SSH user is
+not root. Confirmed live: every decoy-file write and the trap-process install failed with
+"Permission denied" / "No such file or directory" (the `mkdir` failing silently first). Fixed by
+adding `sudo -n` to every write in the script. **Also found, separately**: these decoy paths live
+on the docker **host** filesystem, but reading the real `docker-compose.yml` on the vulnbox shows
+the actual flag is bind-mounted read-only into the vulnerable app container only
+(`/flags/service-03:/flag:ro` on the `node` service) -- an attacker who compromises the real app
+lands inside that container, never on the host, and would never touch any of these decoy paths.
+Documented this as a known limitation in the script itself rather than silently claiming the
+honeytoken "works": it still has value for catching a full container-escape/host compromise, but
+not ordinary app-level flag theft. A container-aware honeytoken (planted via `docker exec` into
+the actual vulnerable service) would be a materially different, more invasive change, not done
+without confirming exact placement with whoever owns that stack.
+
+**4. `deploy-honeytoken.sh`'s background processes were never cleaned up between re-deploys** --
+confirmed live: a `flag-server.sh` from an earlier point in this multi-day session was still
+running **3 days, 23 hours** later, un-killed, exactly the same leak class as the earlier capture
+tcpdump-process finding, just on the honeytoken side. The natural-looking fix (`pkill -f
+'/usr/local/bin/flag-server.sh'` run as part of the same deployment script) turned out to be a
+second, subtler form of the documented `pkill -f` self-match footgun: the whole multi-line
+deployment script is sent to the vulnbox as **one single command string**, so a pattern that
+appears *later in that same string* (it always will -- the pattern is the name of the thing the
+script is about to start) matches the currently-running shell's own command line and kills the
+whole deploy immediately, with zero output. Confirmed live (reproducible exit 255, dies before
+even the first `echo` after the `pkill` line). Fixed with the same pidfile + bare-numeric `kill`
+pattern already proven safe for `capture-remote.sh`/`capture_pull.py`: each cleanup kill is its
+own separate `ssh` call containing only a PID number, never descriptive text. Verified live:
+ran the fixed script 3 times in a row, confirmed exactly 1 `flag-server.sh` process survives
+each time (not accumulating), confirmed the decoy files and the HTTP trap on port 7777 all work.
+
+**5. `health_check.py`'s ML-fingerprint check reported a scary `[FAIL]`
+("no status for 6+ min -- docker restart ctf-ml-fingerprint") for a container that is *never
+supposed to be running* under `MODE=contest`** (confirmed via README: ml-fingerprint is
+`MODE=prep`-only regardless of its config flag, and `ml_classifier.enabled` is `false` in the
+real config) -- purely cosmetic (the container not running is correct, expected behavior), but
+misleading severity. Fixed to match the exact pattern already used for the three Flag-trace
+checks: return a clean `up`/"disabled in config" when `ml_classifier.enabled` is false, instead
+of treating "never started" as a failure.
+
+**Confirmed NOT bugs, investigated and ruled out explicitly rather than assumed**:
+- `deploy-ctfproxy.sh` "skip" ("no port binding for '8003' found under 'public-proxy'") is
+  correct, safe behavior: checked directly on the vulnbox and confirmed ctf_proxy is already
+  running and already fronting the real service (`ctfproxy-team-03-nginx` listening on 8003,
+  `public-proxy` no longer bound to it) from earlier in this session -- the script correctly
+  refused to "guess" and re-insert itself over an already-correct state rather than risk
+  double-inserting or corrupting the live proxy chain.
+- "Tulip flows: newest Ns old" FAIL is the check doing its job correctly for a genuinely quiet
+  practice-arena period with no active checker/attacker traffic -- confirmed via `tcpdump -r` on
+  the newest pcap that capture itself is working (saw real TCP handshakes), and watched the
+  Postgres row count tick up (41 -> 43) and the staleness shrink as this session's own API calls
+  generated a trickle of traffic. The 180s threshold is the right call for an active contest
+  (continuous checker traffic expected) and will correctly flag a truly dead capture pipeline
+  then; it just reads as alarming during an idle rehearsal period with no match running.
+
+All fixes verified live against the real `dfcd-vbox`/team-03 environment over the actual
+competition VPN, not simulated. `test_rulegen.py` (16/16), Flag-trace's own suite (112/112), and
+`validate-config.sh` all still pass after these changes. Local machine and vulnbox resource
+levels checked clean after the full test pass (no leaked processes, `traffic/` at 4.6 MB,
+disk/memory both nominal on both ends).

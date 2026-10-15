@@ -12,7 +12,7 @@
     "note": "ssh_user/ssh_port = team patch key, only reaches this team's public-proxy container (no tcpdump there). capture_ssh_alias = admin SSH (via ~/.ssh/config, ProxyJump to gameserver) used by deploy-capture-pull.sh to tcpdump on the docker HOST. capture_iface (default \"eth0\"/auto) is the EXTERNAL interface, captured pre-NAT so each service's public port (services[].port) is what both tcpdump's BPF and Tulip see directly -- no docker_bridge / capture_port NAT workaround needed. Set docker_bridge only if eth0 genuinely is not where the public IP lives (rare; auto mode tries ip route first)."
   },
   "monitor_host": {
-    "ip": "10.13.9.2",
+    "ip": "10.13.9.34",
     "dashboard_port": 8080,
     "alert_queue_port": 6380,
     "bind_ip": "127.0.0.1",
