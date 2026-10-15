@@ -132,18 +132,29 @@ FLAG_VALIDATOR_TEAM=42
 """
 
 # Upstream Tulip compose files publish "3000:3000" / "5433:5432" on every
-# interface. Rewrite them (idempotently) to bind ${BIND_IP} instead, every run,
-# so a fresh clone of the upstream repo can't silently re-expose them.
+# interface. Rewrite them every run so a fresh clone of the upstream repo
+# can't silently re-expose them:
+#   - 3000 (web UI) follows BIND_IP -- this is the one meant to be opened to
+#     a trusted LAN so teammates can see it.
+#   - 5433 (raw Postgres, no auth beyond the DB password baked into the
+#     image) is ALWAYS forced to 127.0.0.1 regardless of BIND_IP. Before this,
+#     both ports shared the same variable, so following services.json's own
+#     bind_ip_note/CONFIG.md advice ("set bind_ip to a LAN IP so teammates can
+#     see the Dashboard") would have also handed the whole flow database to
+#     anyone on that LAN. The regex matches whatever prefix is currently
+#     there (raw, already-BIND_IP, or already-127.0.0.1) so it self-heals
+#     regardless of which version of this script wrote it last.
 import re
 for fname in ("docker-compose.yml", "docker-compose-suricata.yml"):
     fp = os.path.join(TULIP_DIR, fname)
     if not os.path.exists(fp):
         continue
     txt = open(fp).read()
-    patched = re.sub(r'(- *")(3000:3000|5433:5432)(")', r'\1${BIND_IP:-127.0.0.1}:\2\3', txt)
+    patched = re.sub(r'- "[^"]*?5433:5432"', '- "127.0.0.1:5433:5432"', txt)
+    patched = re.sub(r'- "(?:\$\{BIND_IP:-127\.0\.0\.1\}:)?3000:3000"', '- "${BIND_IP:-127.0.0.1}:3000:3000"', patched)
     if patched != txt:
         open(fp, "w").write(patched)
-        print(f"[gen-tulip-env] Bound published ports to BIND_IP in {fname}")
+        print(f"[gen-tulip-env] Bound published ports in {fname} (3000->BIND_IP, 5433->127.0.0.1 always)")
 
 env_path = os.path.join(TULIP_DIR, ".env")
 with open(env_path, "w") as f:

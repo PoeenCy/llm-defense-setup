@@ -21,7 +21,11 @@ services:
     container_name: ctf-redis
     restart: unless-stopped
     ports:
-      - "${BIND_IP:-127.0.0.1}:${ALERT_QUEUE_PORT:-6380}:6379"
+      # Always loopback-only, never follows BIND_IP: this is a shared alert
+      # queue with zero auth. Opening it to a LAN (e.g. to let teammates see
+      # the Dashboard) would hand out full read/write/clear access to every
+      # alert the system has ever seen, to anyone on that network.
+      - "127.0.0.1:${ALERT_QUEUE_PORT:-6380}:6379"
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     networks:
       - ctf-net
@@ -43,8 +47,11 @@ services:
     ports:
       # public: honeytoken traps + OS-watchdog reports from the vulnbox only
       - "${HONEYTOKEN_PORT:-9999}:9997"
-      # admin/test endpoints (alerts listing, clear, inject-flag): loopback only
-      - "${BIND_IP:-127.0.0.1}:9998:9999"
+      # admin/test endpoints (alerts listing, clear, inject-flag): ALWAYS
+      # loopback only, never follows BIND_IP -- unauthenticated and includes
+      # a real alerts/clear and inject-flag, not something to hand to a LAN
+      # just because the Dashboard is being opened to teammates.
+      - "127.0.0.1:9998:9999"
     environment:
       - FLAG_REGEX=${FLAG_REGEX}
       - HONEYTOKEN_FLAG=${HONEYTOKEN_FLAG}

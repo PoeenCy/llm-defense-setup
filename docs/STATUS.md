@@ -1669,3 +1669,63 @@ schema, confirmed `since <id>` filtering is exact, restarted `host_agent.py` and
 shape a push would have produced. Re-ran `deploy-honeytoken.sh` again afterward and confirmed
 still exactly one `flag-server.sh` process (the leak fix from the earlier entry still holds).
 `test_rulegen.py` (16/16), Flag-trace suite (112/112), `validate-config.sh` all still pass.
+
+## 2026-10-16 — Opened Dashboard/Tulip to the LAN; found and fixed Redis/admin-API/Postgres sharing the same bind toggle; audited the host for other exposed ports
+
+User asked to open Dashboard and Tulip to the home LAN for teammates, and to audit the firewall
+for anything left open that shouldn't be.
+
+**Found before opening anything**: `monitor_host.bind_ip` -- the one documented knob for "let a
+teammate open the Dashboard" (`CONFIG.md`, `docs/SCHEMA.md`) -- was wired to THREE other ports
+besides the Dashboard: Redis (`docker-compose.contest.yml`), the detection admin/test API (same
+file, includes `/alerts/clear` and `/test/inject-flag`), and Tulip's own Postgres (patched into
+Tulip's vendored compose file by `gen-tulip-env.py`'s regex). None of the three have any
+authentication. Following the repo's own documented instructions for exactly what was asked
+("open the dashboard to the LAN") would have also handed the alert queue, the test/inject-flag
+endpoints, and the raw flow database to anyone on that LAN -- a real gap in the existing design,
+not something introduced today.
+
+Fixed by decoupling: `docker-compose.contest.yml`'s redis and admin-API port lines are now
+hardcoded to `127.0.0.1`, no longer reading `${BIND_IP}` at all. `gen-tulip-env.py`'s port-patch
+regex now treats 3000 (web UI, follows `BIND_IP`) and 5433 (Postgres, hardcoded to `127.0.0.1`
+unconditionally) differently, and self-heals regardless of which version of the script patched
+Tulip's compose file last (matches on the whole quoted port spec, not just the unpatched
+upstream form, so it also fixes a box that was already patched the old way). Updated
+`bind_ip_note` in `services.json`, `docs/SCHEMA.md`, and `CONFIG.md`'s port-security section to
+describe the new, narrower scope.
+
+Set `monitor_host.bind_ip` to this machine's actual LAN address (`192.168.1.202`, confirmed via
+`ip -4 addr show` on the `wlo1` interface -- NOT the VMware `vmnet1`/`vmnet8` addresses, which
+aren't reachable from another physical machine on the LAN, and NOT the competition VPN's
+WireGuard address, which was down at the time and is a separate network from the home LAN
+entirely).
+
+**Verified live** after `MODE=contest bash deploy-all.sh` regenerated configs and recreated the
+containers: `ss -tlnp` shows Dashboard (8080) and Tulip (3000) bound to `192.168.1.202`
+specifically (not `0.0.0.0`, not `127.0.0.1`), both return HTTP 200 over that address; Redis
+(6380), the admin API (9998), and Postgres (5433) still show `127.0.0.1` only, and a `curl` to
+each over the LAN IP times out as expected. (Reachability from a *second* physical device on
+the same wifi wasn't tested -- no second machine available this session -- but the bind address
+itself is now provably the LAN interface, not loopback, which is the actual mechanism that
+determines reachability.)
+
+**Separately, full-host port audit** (`ss -tlnp` across every interface), to answer "is
+anything else left open that shouldn't be": the WireGuard VPN interface for the competition
+network (`team-03-m4`) is currently down (`ip link show` reports the device doesn't exist) --
+confirmed this doesn't affect SSH/capture to the vulnbox at all, since that goes through a
+*different*, independent path (`~/.ssh/config`'s `dfcd-game` ProxyJump bastion, over the public
+internet, not this VPN) -- but it does mean `monitor_host.ip` (used for the honeytoken/OS-
+watchdog push attempt, now just a fallback since the pull mechanism doesn't need it) isn't a
+live, bound address on this machine at the moment; unrelated to anything fixed today, noted for
+awareness. Two listeners found that are **not part of this repo at all** and were left alone
+(out of scope, this machine's own choice, not touched): `ollama serve` listening on `*:11434`
+(all interfaces, no auth -- pre-existing personal use of this laptop) and VMware's own `902`
+service (`vmware-authdlauncher`-class port, `0.0.0.0`/`[::]` -- ships with VMware Workstation,
+unrelated to the CTF stack). Confirmed this host's `ufw` is still `ENABLED=no` (checked earlier
+this session too) -- there is no general firewall layer on this machine at all; everything that
+is or isn't reachable is determined purely by which address each service's own listener binds
+to, which is exactly why the bind_ip sharing bug above mattered and why Ollama/VMware being on
+`0.0.0.0` is worth knowing about even though they're not this repo's concern to fix.
+
+`test_rulegen.py` (16/16) and the Flag-trace suite (112/112) both still pass; `validate-config.sh`
+passes.

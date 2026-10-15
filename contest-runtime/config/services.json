@@ -15,8 +15,8 @@
     "ip": "10.13.9.34",
     "dashboard_port": 8080,
     "alert_queue_port": 6380,
-    "bind_ip": "127.0.0.1",
-    "bind_ip_note": "Address the control-plane ports (dashboard, redis, tulip, postgres) listen on. 127.0.0.1 = only this machine (safe default: the monitor host sits on the competition VPN, and these ports have no auth). Set to a LAN IP only to let teammates on a trusted network open the dashboard. The honeytoken port always listens on all interfaces by design."
+    "bind_ip": "192.168.1.202",
+    "bind_ip_note": "Address the Dashboard (8080) and Tulip web UI (3000) listen on. 127.0.0.1 = only this machine (safe default). Set to a LAN IP to let teammates on a trusted network open them (2026-10-16: changed to 192.168.1.202, this machine's home-wifi/LAN address -- verify with `ip -4 addr show` if this box's network changes). Redis (6380), the detection admin/test API (9998), and Tulip's Postgres (5433) are now ALWAYS loopback-only regardless of this value -- all three are unauthenticated, so they no longer follow bind_ip (fixed 2026-10-16; previously they did, which meant the documented 'open the dashboard to teammates' step also handed out the alert queue, test/inject-flag endpoints, and the raw flow database to the whole LAN). The honeytoken port always listens on all interfaces by design."
   },
   "flag": {
     "regex": "[A-Z0-9]{31}=",

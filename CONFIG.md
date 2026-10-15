@@ -45,16 +45,19 @@ Dashboard hỏng hẳn? Xem mục cuối ("Không mở được Dashboard").
 | Lỡ sửa config hỏng | Tab CONFIG → **Rollback** (mỗi lần lưu đều có backup trong `contest-runtime/config-backups/`) |
 | Không có ctf_proxy, cần chặn gấp mà attacker **chung IP với checker** | Tab SERVICES → khung "Fallback block — theo NỘI DUNG" → dán đúng chuỗi đặc trưng trong payload (không phải IP) → **Block content**. Chặn theo nội dung TCP payload (iptables `string`-match), không quan tâm IP, nên không sợ mất SLA do trùng IP checker — nhưng vẫn nên **Test on recent traffic** (tab RULES) với cùng chuỗi trước |
 | Muốn đọc log thuần text | EVENTS → **Open as .log**, hoặc `curl -s localhost:8080/api/events.log \| less` |
-| Đồng đội muốn xem Dashboard từ máy khác | Tab CONFIG → *Dashboard bind IP* = IP LAN của máy này. **Chỉ làm trong mạng tin cậy** — các cổng này không có mật khẩu |
+| Đồng đội muốn xem Dashboard/Tulip từ máy khác | Tab CONFIG → *Dashboard bind IP* = IP LAN của máy này (`ip -4 addr show` để lấy đúng IP). Chỉ mở Dashboard (8080) + Tulip (3000); Redis/admin API/Postgres luôn giữ loopback bất kể giá trị này. **Chỉ làm trong mạng tin cậy** — 2 port này không có mật khẩu |
 
 ---
 
 ## Bảo mật cổng (đã khoá sẵn)
 
-Máy này nằm **trong VPN thi đấu**. Mọi cổng điều khiển (Dashboard 8080, Redis 6380, Tulip 3000,
-Postgres 5433, ...) chỉ nghe `127.0.0.1`. Chỉ cổng **9999** mở ra ngoài, và chỉ nhận đúng 2 thứ từ
-vulnbox: báo honeytoken và báo cáo OS-watchdog. Các API quản trị của detection nằm ở
-`127.0.0.1:9998`.
+Máy này nằm **trong VPN thi đấu**. Mặc định mọi cổng điều khiển chỉ nghe `127.0.0.1`. Dashboard
+(8080) và Tulip (3000) đọc theo `monitor_host.bind_ip` trong `services.json` — đổi được sang IP
+LAN để đồng đội xem được (xem bảng trên). **Redis (6380), API quản trị của detection
+(`127.0.0.1:9998`), và Postgres của Tulip (5433) luôn chỉ nghe `127.0.0.1`, không theo
+`bind_ip`** — cả 3 không có mật khẩu, nên không bao giờ mở ra LAN dù `bind_ip` đổi thành gì.
+Chỉ cổng **9999** mở ra ngoài theo thiết kế, và chỉ nhận đúng 2 thứ từ vulnbox: báo honeytoken và
+báo cáo OS-watchdog.
 
 ---
 

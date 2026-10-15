@@ -55,7 +55,7 @@
 | `ip` | string (IPv4) | **yes** | This machine's LAN IP on the competition network |
 | `dashboard_port` | integer | **yes** | Dashboard HTTP port |
 | `alert_queue_port` | integer | **yes** | Redis port for the shared alert/ops queue |
-| `bind_ip` | string (IPv4) | no | Address the control-plane ports (dashboard, redis, Tulip, Postgres) listen on. `127.0.0.1` (default/safe) = only this machine. Set to a LAN IP only to let a teammate on a trusted network open the dashboard — these ports have no auth. The honeytoken collector port always listens on all interfaces regardless, by design (it must be reachable from the vulnbox) |
+| `bind_ip` | string (IPv4) | no | Address the Dashboard (8080) and Tulip web UI (3000) listen on. `127.0.0.1` (default/safe) = only this machine. Set to a LAN IP to let a teammate on a trusted network open them. Redis (`alert_queue_port`), the detection admin/test API, and Tulip's Postgres are **always** loopback-only regardless of this value (fixed 2026-10-16 -- they used to follow `bind_ip` too, which meant opening the dashboard to a LAN also handed out the unauthenticated alert queue and test/inject-flag endpoints). The honeytoken collector port always listens on all interfaces regardless, by design (it must be reachable from the vulnbox) |
 | `bind_ip_note` | string | no | Reminder of the above |
 
 There is no `ioc_api_port` or any LLM-related field here — that component was removed from the
