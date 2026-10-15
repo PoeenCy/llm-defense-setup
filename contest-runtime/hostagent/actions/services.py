@@ -31,7 +31,7 @@ def _capture_state() -> tuple[str, str]:
     local = "running" if _pull_loop_pid() else "stopped"
     if not alias:
         return "unknown", "vulnbox.capture_ssh_alias not set"
-    code, out = ssh(alias, "pgrep -f 'tcpdump -Z root' >/dev/null && echo RUNNING || echo STOPPED", timeout=15)
+    code, out = run(["python3", str(ROOT / "monitor" / "capture_pull.py"), "--status"], timeout=20)
     if code != 0:
         return ("degraded" if local == "running" else "stopped"), f"vulnbox unreachable; local pull loop {local}"
     remote = "running" if "RUNNING" in out else "stopped"
@@ -43,28 +43,21 @@ def _capture_state() -> tuple[str, str]:
 
 
 def _ctfproxy_state() -> tuple[str, str]:
-    services = ctfproxy.eligible_services(cfg())
-    if not services:
-        return "disabled", "no TCP services in services.json for ctf_proxy to front"
-    x0, err = ctfproxy._ctx({})
+    x, err = ctfproxy._ctx()
     if err:
         return "disabled", "monitor-only mode (ctf_proxy.insertion.mode is not docker-compose)"
-    sans = " ".join(ctfproxy._q(s["san"]) for s in services)
-    cmd = (f"docker inspect -f '{{{{.State.Status}}}}' ctfproxy-{x0['team']}-nginx ctfproxy-{x0['team']}-proxy 2>/dev/null; "
-           f"for s in {sans}; do test -f ~/{x0['base']}/filter-backups/${{s}}_in.py.paused-rules && echo \"PAUSED:$s\"; done")
-    code, out = ssh(x0["alias"], cmd, timeout=15)
+    code, out = ssh(x["alias"],
+                    f"docker inspect -f '{{{{.State.Status}}}}' ctfproxy-{x['team']}-nginx ctfproxy-{x['team']}-proxy 2>/dev/null; "
+                    f"test -f {ctfproxy._q(x['paused'])} && echo PAUSED || true", timeout=15)
     if code == 255 or code < 0:
         return "unknown", "vulnbox unreachable over SSH — state unknown"
     lines = [l.strip() for l in out.splitlines() if l.strip()]
-    container_states = [l for l in lines if not l.startswith("PAUSED:")]
-    paused = [l.split(":", 1)[1] for l in lines if l.startswith("PAUSED:")]
-    if container_states.count("running") != 2:
-        return "down", f"containers: {', '.join(container_states) or 'not found'}"
-    if not paused:
-        return "running", f"filtering active ({len(services)} service(s))"
-    if len(paused) == len(services):
-        return "paused", "in the traffic path, but filtering paused on all services — everything passes"
-    return "degraded", f"filtering paused on: {', '.join(paused)}; still active on the rest"
+    states = [l for l in lines if l != "PAUSED"]
+    if states.count("running") != 2:
+        return "down", f"containers: {', '.join(states) or 'not found'}"
+    if "PAUSED" in lines:
+        return "paused", "in the traffic path, but filtering paused — everything passes"
+    return "running", "filtering active"
 
 
 def _state_of(svc: dict) -> dict:
@@ -98,18 +91,9 @@ def list_services(payload, rdb):
 def _capture(op: str) -> tuple[bool, str]:
     alias = cfg().get("vulnbox", {}).get("capture_ssh_alias")
     if op in ("stop", "restart"):
-        pid = _pull_loop_pid()
-        if pid:
-            # Kill only the loop and its own children. NOT killpg: the loop was
-            # spawned from this agent and can share its process group.
-            run(["pkill", "-TERM", "-P", str(pid)], timeout=10)
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
-        PULL_PIDFILE.unlink(missing_ok=True)
-        if alias:
-            ssh(alias, "sudo -n pkill -f 'tcpdump -Z root' || true", timeout=20)
+        code, out = run(["python3", str(ROOT / "monitor" / "capture_pull.py"), "--stop"], timeout=90)
+        if code != 0:
+            return False, out[-1500:]
         if op == "stop":
             return True, "Capture stopped (remote tcpdump + local pull loop). Already-captured pcaps are kept."
     code, out = run(["bash", str(ROOT / "monitor" / "deploy-capture-pull.sh"), "--background"], timeout=90)
@@ -138,7 +122,7 @@ def control(payload, rdb):
         msg = out[-1500:]
     else:
         if op == "restart":
-            x, err = ctfproxy._ctx({})
+            x, err = ctfproxy._ctx()
             if err:
                 return {"ok": False, "output": err}
             code, out = ssh(x["alias"], f"docker restart ctfproxy-{x['team']}-proxy", timeout=90)

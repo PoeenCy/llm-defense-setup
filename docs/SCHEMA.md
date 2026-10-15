@@ -27,6 +27,8 @@
 | `ctf_proxy` | object | **yes** | Edge-mitigation proxy config: keyword, nginx failover tuning, and how/whether to insert it against a real vulnbox |
 | `ml_classifier` | object | **yes** | Compliance gate for the optional ml-fingerprint classifier |
 | `services` | array | **yes** | List of vulnbox services to monitor — one or more, any mix of TCP/UDP/HTTP/raw |
+| `capture` | object | no | Capture session tuning (see below); every field optional, defaults are safe |
+| `flagtrace` | object | no | Optional flag-exfiltration chain-tracing feature (see below); absent = fully off, nothing starts |
 | `retention` | object | no | Disk-space guard tiers (see below); every field optional, defaults are safe |
 
 ---
@@ -173,6 +175,46 @@ only ever fronts the ones with `proto: "tcp"` (see `layer`/`compose_service` bel
 | `compose_service` | string | no | The docker-compose service name on the vulnbox-host that's currently binding this service's `port` — needed by `deploy-ctfproxy.sh` to know which port line to remove and which container to recreate. Falls back to `ctf_proxy.insertion.remote_compose_service` when omitted (single-service configs written before this field existed keep working with zero changes) |
 | `description` | string | no | Human-readable service description |
 | `note` | string | no | Free-form per-service reminder |
+
+---
+
+## `capture` object
+
+Tunes the session-owned capture loop (`contest-runtime/monitor/capture_pull.py`). Every field
+optional; the BPF filter itself is always built from every port in `services[]` (protocol-
+agnostic — matches TCP and UDP alike), never from this object.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `rotate_seconds` | integer | no | How often tcpdump rotates to a new pcap file on the vulnbox-host (default `30`). A file is only pulled to the monitor once it's been rotated out and closed — never while still being written |
+| `remote_max_mb` | integer | no | Spool cap on the vulnbox-host (default `512`). If the capture session's own directory passes this, or the vulnbox's free disk drops below 256MB, the remote tcpdump stops itself gracefully (closes the in-progress file first, nothing lost) rather than filling the vulnbox's disk |
+| `pull_seconds` | integer | no | How often the monitor polls for newly-closed files to pull (default `5`) |
+
+Separately, `retention.min_free_gb` (see below) also gates the MONITOR side: pulling pauses if
+the monitor's own free disk drops below that floor, independent of the vulnbox-side cap above.
+
+---
+
+## `flagtrace` object
+
+Optional. Absent or `enabled: false` = nothing starts. Full reference, commands and rollout:
+`contest-runtime/flagtrace/README.md`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `enabled` | boolean | no | Starts `ctf-flagtrace` (ingest + read API). Needs `game.id`, `game.start_time`, `game.tick_seconds`, `game.checker_ips` and `teams[].ips` |
+| `trace.enabled` | boolean | no | Starts `ctf-flagtrace-worker` (Phase 2 trace profiles). Requires `enabled: true`. Turning it off stops the worker only; stored profiles/results are kept |
+| `trace.*` limits | numbers | no | `algorithm_budget_ms`, `max_depth`, `max_nodes`, `max_edges`, `max_tokens_per_node`, `max_candidates_per_token`, `max_query_rows`, `token_max_df`, `df_min_samples` (`max_context`, `context_window_seconds`, `burst_gap_seconds` were removed with context in engine p2.3.2 and are rejected); operational: `poll_seconds`, `lease_seconds`, `max_attempts`. Starting values, not benchmarked |
+| `trace.same_service_only` | boolean | no | Must stay `true` in this release; `false` is rejected |
+| `decoder_mode` | string | no | `full` (default) decodes every body; `gated` only bodies that look encoded (as detection does); `off` none, so flags only visible after decoding are missed. The dashboard (FLAG TRACE tab) can override it at runtime; that override is kept across restarts until reset |
+| `flag_ids_url` | string | no | HTTP(S) URL polled once per tick for flag IDs. Must return a JSON list of `{"tick", "service", "owner_team_id", "value"}` (service names as in `services[].name`); a contest API in another shape needs an adapter. Without it, flag IDs still come from the checker's own putflag sessions, or from `import-flagids <file>` |
+| `game.flag_validity_ticks` | integer | no | How many ticks a flag stays valid, from the game rules. Used to accept a flag ID as a value role `target`; absent = any earlier tick is accepted, and results say so |
+
+Value roles (`target`) match flag IDs owned by the top-level `team_id`: captures are taken on this team's vulnbox, so every flag-out leaks a flag this team owns.
+
+Also used by `contest-runtime/hostagent/retention.py`: a pcap is never deleted while Flag-trace's
+own ingest might still need it (see the `retention` object below) — no new field required, this
+checks `flagtrace.enabled` and whether the Flag-trace database already exists.
 
 ---
 

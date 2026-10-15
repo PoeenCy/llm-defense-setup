@@ -21,6 +21,7 @@
   <nav class="tabnav" id="tabnav">
     <button data-tab="monitor">MONITOR</button>
     <button data-tab="events">EVENTS</button>
+    <button data-tab="flagtrace">FLAG TRACE</button>
     <button data-tab="hunt">HUNT</button>
     <button data-tab="rules">RULES</button>
     <button data-tab="applied">APPLIED</button>
@@ -205,6 +206,110 @@
         <thead><tr><th>Time (UTC)</th><th>Severity</th><th>Source / Type</th><th>Src → Dst</th><th>Tulip flow</th><th>Message</th><th></th></tr></thead>
         <tbody id="ev-body"><tr><td colspan="7" class="er-empty">Loading...</td></tr></tbody>
       </table>
+    </div>
+  </div>
+</section>
+
+<!-- ══ TAB: FLAG TRACE (one profile per flag-out transaction) ═══ -->
+<section class="tab tab-page" id="tab-flagtrace" hidden>
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title"><span>🧬</span> Flag-out profiles <span class="panel-badge badge-cyan" id="ft-count">—</span></div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="ft-dim" id="ft-backlog"></span>
+        <span class="state state-unknown" id="ft-worker">—</span>
+      </div>
+    </div>
+    <div class="help">One profile per captured transaction whose <b>response carried a flag</b>. Each analysis looks back from it,
+      within the same source and service and never after the flag-out, for earlier messages that carried the values it used.
+      Only steps linked by a value are shown: <b>⚑ anchor</b> = the flag-out · <b>⇄ data-linked</b> = a value it used came from here.
+      A role is not a verdict that the request exploited a bug. <b>linked</b> means the data stored at that moment was processed,
+      not that the exploit was found or reproduced. Re-analyse after late traffic lands; earlier results stay in the history.</div>
+    <div class="er-toolbar" id="ft-decoder-bar">
+      <span class="ft-dim">Ingest decoder</span>
+      <select class="er-select" id="ft-decoder" title="full = decode every body · gated = only bodies that look encoded, as detection does · off = no decoding">
+        <option value="full">full</option><option value="gated">gated</option><option value="off">off</option>
+      </select>
+      <button class="btn" id="ft-decoder-reset" hidden>Back to config default</button>
+      <span class="state state-unknown" id="ft-decoder-state">—</span>
+      <span class="ft-dim" id="ft-decoder-out"></span>
+    </div>
+    <div class="er-toolbar">
+      <input class="ioc-input" id="ft-source" placeholder="source: team:&lt;id&gt; or ip:&lt;addr&gt;" />
+      <input class="ioc-input" id="ft-service" placeholder="service" />
+      <select class="er-select" id="ft-state">
+        <option value="">All states</option>
+        <option value="linked">linked</option><option value="partial">partial</option>
+        <option value="seed_only">anchor only</option><option value="pending">pending</option>
+        <option value="running">running</option><option value="failed">failed</option>
+      </select>
+      <button class="btn" id="ft-search">Search</button>
+      <label class="chk"><input type="checkbox" id="ft-auto" checked> auto-refresh</label>
+      <label class="chk" title="One row per source, service, flag and request; ×N opens the repeats"><input type="checkbox" id="ft-group" checked> group identical flag-outs</label>
+    </div>
+    <div class="er-table-wrap" style="max-height:30vh;">
+      <table class="er-table">
+        <thead><tr><th>Request time (UTC)</th><th>Source</th><th>Service · tick</th><th>Anchor request</th><th>Flags</th><th>State</th><th>Result</th></tr></thead>
+        <tbody id="ft-list"><tr><td colspan="7" class="er-empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
+    <div class="row-actions"><button class="btn" id="ft-more" hidden>Load more</button></div>
+  </div>
+
+  <div class="panel" id="ft-detail" hidden>
+    <div class="panel-header">
+      <div class="panel-title"><span>🔗</span> <span id="ft-title">Profile</span></div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <label class="chk" for="ft-runs">Result</label>
+        <select class="er-select" id="ft-runs"></select>
+        <button class="btn" id="ft-retrace">Re-analyse</button>
+      </div>
+    </div>
+    <div class="help" id="ft-head"></div>
+    <div class="out" id="ft-retrace-out"></div>
+    <div class="help" id="ft-summary"></div>
+    <div class="help" id="ft-chain-group"></div>
+    <div class="ft-grid">
+      <div class="ft-col">
+        <div class="ft-subtitle">Timeline (stable order by packet time; equal times across connections are not a causal order)</div>
+        <div class="er-table-wrap">
+          <table class="er-table"><thead><tr><th>#</th><th>Δ anchor</th><th>Role</th><th>Request</th><th>Conn:seq</th><th>Why included</th><th>Tulip</th><th>Copy</th></tr></thead>
+          <tbody id="ft-steps"></tbody></table>
+        </div>
+        <div class="ft-subtitle">Steps that differ from what the checker sends — a lead to look at, not a verdict</div>
+        <div class="help" id="ft-suspects-summary"></div>
+        <div class="er-table-wrap">
+          <table class="er-table"><thead><tr><th>#</th><th>Request</th><th>Evidence</th><th>What differs</th></tr></thead>
+          <tbody id="ft-suspects"></tbody></table>
+        </div>
+        <div class="ft-subtitle">Value links — click one to see where the value came from and where it was used</div>
+        <div class="er-table-wrap">
+          <table class="er-table"><thead><tr><th>From</th><th>To</th><th>Kind</th><th>Value</th><th>Choice</th><th>Note</th></tr></thead>
+          <tbody id="ft-edges"></tbody></table>
+        </div>
+        <div class="ft-subtitle">Values — what each one is, i.e. how a script would obtain it (anything not listed is sent verbatim)</div>
+        <div class="help" id="ft-values-summary"></div>
+        <div class="er-table-wrap">
+          <table class="er-table"><thead><tr><th>#</th><th>Where</th><th>Role</th><th>Variable / template</th><th>Value</th><th>Why</th></tr></thead>
+          <tbody id="ft-values"></tbody></table>
+        </div>
+        <div class="ft-subtitle">Replay scripts — generated only; never run against a service from this page</div>
+        <div class="help" id="ft-scripts-summary"></div>
+        <div class="er-table-wrap">
+          <table class="er-table"><thead><tr><th>Artifact</th><th>Support</th><th>Verification</th><th>Limits</th><th></th></tr></thead>
+          <tbody id="ft-scripts"></tbody></table>
+        </div>
+        <pre class="out" id="ft-script-preview" hidden></pre>
+        <details class="ft-details" id="ft-group-details" hidden>
+          <summary>Chains of this group (<span id="ft-group-n">0</span>) and how each field varies across them</summary>
+          <div id="ft-group-body"></div></details>
+        <details class="ft-details"><summary>Coverage and unexplained values (<span id="ft-unexplained-n">0</span>)</summary>
+          <div id="ft-coverage"></div></details>
+      </div>
+      <div class="ft-col">
+        <div class="ft-subtitle">Evidence (captured bytes, shown as text)</div>
+        <div id="ft-evidence"></div>
+      </div>
     </div>
   </div>
 </section>
@@ -574,6 +679,10 @@
 <script src="/static/js/applied.js"></script>
 <script src="/static/js/services.js"></script>
 <script src="/static/js/config.js"></script>
+<script src="/static/js/flagtrace.js"></script>
+<script src="/static/js/flagtrace-groups.js"></script>
+<script src="/static/js/flagtrace-chains.js"></script>
+<script src="/static/js/flagtrace-tulip.js"></script>
 <script src="/static/js/main.js"></script>
 </body>
 </html>

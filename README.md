@@ -13,7 +13,8 @@ only model-adjacent component, and it's off by default.
 [![Docker Compose](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 
 **→ [START.md](START.md) — khởi chạy lần đầu, bắt đầu ở đây.**  
-**→ [CONFIG.md](CONFIG.md) — need to change a port/IP/config RIGHT NOW mid-competition? Start there, not here.**
+**→ [CONFIG.md](CONFIG.md) — need to change a port/IP/config RIGHT NOW mid-competition? Start there, not here.**  
+**→ [AGENTS.md](AGENTS.md) — bạn (hoặc agent của bạn) vừa clone repo này? Đọc file đó trước.**
 
 [Architecture](docs/ARCHITECTURE.md) · [Runbook](docs/RUNBOOK.md) · [Config schema](docs/SCHEMA.md) · [Verified status](docs/STATUS.md) · [Demo script](docs/DEMO.md) · [Go live on competition day](docs/GOLIVE.md)
 

@@ -59,6 +59,14 @@ def ops_loop():
             item = rdb.blpop("ops_requests", timeout=5)
             if item:
                 pool.submit(_handle, item[1])
+        except redis.TimeoutError:
+            # A socket read timeout on the BLPOP itself (not a dropped
+            # connection) — common on WSL/Docker-Desktop localhost port
+            # forwarding. redis.TimeoutError is NOT a subclass of
+            # ConnectionError, so it must be caught separately or it kills
+            # the whole agent. The connection is usually still usable; just
+            # loop and block again.
+            continue
         except redis.ConnectionError:
             time.sleep(3)
             rdb = redis_client()

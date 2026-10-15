@@ -9,14 +9,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .core.config import MODE, STATIC_DIR
-from .routes import applied, events, hunt, live, rules, services, status, tulip
+from .routes import applied, events, flagtrace, hunt, live, rules, services, status, tulip
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [DASHBOARD] %(levelname)s %(name)s: %(message)s")
 logging.getLogger("dashboard").info("MODE=%s", MODE)
 
 app = FastAPI(title="CTF Monitor Dashboard", docs_url=None, redoc_url=None)
 
-for module in (live, status, events, rules, services, tulip, applied, hunt):
+for module in (live, status, events, rules, services, tulip, applied, hunt, flagtrace):
     app.include_router(module.router)
 
 

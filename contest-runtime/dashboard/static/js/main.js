@@ -18,14 +18,26 @@ const TAB_ALWAYS_RELOAD = {
   applied: () => loadApplied(false),
 };
 
-function showTab(name) {
-  if (!document.getElementById('tab-' + name)) name = 'monitor';
+// Tabs that need to know when they are shown or left, e.g. to stop polling,
+// and that take a sub-route after the tab name: #flagtrace/<trace>/<run>.
+const TAB_HOOKS = {
+  flagtrace: { show: sub => ftShow(sub), hide: () => ftHide() },
+};
+
+function showTab(route) {
+  const [first, ...rest] = String(route || '').split('/');
+  const name = document.getElementById('tab-' + first) ? first : 'monitor';
+  const sub = name === first && TAB_HOOKS[name] ? rest.join('/') : '';
+  const previous = currentTab;
   currentTab = name;
   document.querySelectorAll('.tab').forEach(t => { t.hidden = t.id !== 'tab-' + name; });
   document.querySelectorAll('#tabnav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
-  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  const hash = '#' + name + (sub ? '/' + sub : '');
+  if (location.hash !== hash) history.replaceState(null, '', hash);
   if (!TAB_LOADED[name] && TAB_FIRST_OPEN[name]) { TAB_LOADED[name] = true; TAB_FIRST_OPEN[name](); }
   else if (TAB_ALWAYS_RELOAD[name]) TAB_ALWAYS_RELOAD[name]();
+  if (previous !== name && TAB_HOOKS[previous]) TAB_HOOKS[previous].hide();
+  if (TAB_HOOKS[name]) TAB_HOOKS[name].show(sub);
 }
 
 async function loadMeta() {
@@ -52,6 +64,7 @@ async function loadMeta() {
   initSound();
   initHunt();
   initApplied();
+  initFlagtrace();
   showTab(location.hash.slice(1) || 'monitor');
   connect();
   pollWatchdog();

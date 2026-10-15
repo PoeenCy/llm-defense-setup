@@ -12,7 +12,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from ..core.config import TULIP_API_URL
+from ..core.config import TULIP_API_URL, load_services_config
+from .. import decoders  # defence-side decode engine; Tulip itself stays vanilla
 
 router = APIRouter(prefix="/api/tulip")
 
@@ -142,17 +143,41 @@ async def get_flow(flow_id: str):
         return JSONResponse({"error": f"Tulip returned HTTP {e.code} (unknown flow id?)"}, status_code=404)
     except Exception as e:
         return JSONResponse({"error": f"Tulip API unreachable: {e}"}, status_code=502)
-    messages = []
+    # Tulip is vanilla here (no decoder), so every item is the raw conversation.
+    # We decode on the dashboard side instead: for each message we run the decode
+    # engine and surface any decoding that reveals a flag the raw bytes did not
+    # already show (base64/gzip/xor/... exfil). The decodings go in `decoded`,
+    # NOT in `messages`: the Rules tab builds rule content from client messages,
+    # and bytes lifted from a *decoded* payload never appear on the wire, so a
+    # rule written from them would never match.
+    flag_re = decoders.compile_regex(
+        (load_services_config().get("flag") or {}).get("regex"))
+    messages, decoded = [], []
     for item in flow.get("items") or []:
         try:
-            text = base64.b64decode(item.get("data") or "").decode("latin-1")
+            raw = base64.b64decode(item.get("data") or "")
         except (ValueError, TypeError):
-            text = ""
-        messages.append({
-            "direction": "client" if item.get("direction") == "c" else "server",
-            "time": item.get("time"),
-            "text": text,
-        })
+            raw = b""
+        direction = "client" if item.get("direction") == "c" else "server"
+        entry = {"direction": direction, "time": item.get("time"),
+                 "text": raw.decode("latin-1")}
+        kind = item.get("kind") or "raw"
+        if kind != "raw":
+            # Back-compat: if a non-vanilla Tulip already produced a decoding.
+            decoded.append({**entry, "kind": kind})
+            continue
+        messages.append(entry)
+        if flag_re is None or not decoders.looks_encoded(raw):
+            continue
+        known = set(flag_re.findall(raw))
+        for fnd in decoders.find_flags(raw, flag_re, known=known):
+            decoded.append({
+                "direction": direction,
+                "time": item.get("time"),
+                "kind": f"decode: {fnd.path}",
+                "flags": [f.decode(errors="replace") for f in fnd.flags],
+                "text": fnd.data.decode("latin-1", "replace")[:8000],
+            })
     return {
         "id": flow.get("id"),
         "time": flow.get("time"),
@@ -161,4 +186,5 @@ async def get_flow(flow_id: str):
         "tags": flow.get("tags"),
         "flags": flow.get("flags"),
         "messages": messages,
+        "decoded": decoded,
     }

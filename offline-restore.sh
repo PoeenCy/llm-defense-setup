@@ -52,6 +52,9 @@ for tarfile in "$BUNDLE/images/"*.tar; do
 done
 
 ok "Loaded $IMAGE_COUNT image(s) [${FAIL_COUNT} failed]"
+if python3 -c "import json,sys; sys.exit(not json.load(open('$SCRIPT_DIR/contest-runtime/config/services.json')).get('flagtrace',{}).get('enabled',False))"; then
+    docker image inspect ctf-flagtrace:phase2 >/dev/null 2>&1 || die "Flag-trace image missing from offline bundle; rebuild with pull-and-save.sh"
+fi
 echo ""
 docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" | head -30
 echo ""

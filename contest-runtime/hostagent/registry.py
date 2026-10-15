@@ -23,6 +23,8 @@ SERVICES = [
     ("suricata",         "Detection",  "Suricata IDS",                "container", "tulip-suricata-1",     False, "Signature engine; rules in the Rules tab"),
     ("detection",        "Detection",  "Flag-out / honeytoken detector", "container", "ctf-detection",     False, "Stopped = no flag-out alerts"),
     ("watchdog",         "Detection",  "SLA watchdog",                "container", "ctf-watchdog",         False, "Polls your service ports"),
+    ("flagtrace",        "Detection",  "Flag-trace ingest",           "container", "ctf-flagtrace",        False, "Transactions, tokens and durable trace queue"),
+    ("flagtrace-worker", "Detection",  "Flag-trace trace worker",     "container", "ctf-flagtrace-worker", False, "Builds trace profiles; stopped = flag-outs queue up, ingest keeps running"),
     ("ml",               "Detection",  "ML bot fingerprinter",        "container", "ctf-ml-fingerprint",   False, "Hints only"),
     ("capture",          "Capture",    "Traffic capture (remote tcpdump + pull)", "capture", None,         False, "Stopped = Tulip/Suricata get no new traffic"),
     ("os-watchdog",      "Capture",    "OS watchdog (agent on vulnbox host)", "oswatchdog", None,      False, "Reports new processes, cron, ssh keys, changed binaries"),

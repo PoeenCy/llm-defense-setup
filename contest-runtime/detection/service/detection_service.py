@@ -28,6 +28,8 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import dpkt
 
+import decoders  # defence-side decode engine (base64/gzip/xor/... -> hidden flags)
+
 # ── Config from environment ──────────────────────────────────────────────────
 FLAG_REGEX       = os.environ.get("FLAG_REGEX", r"[A-Z0-9]{31}=")
 HONEYTOKEN_FLAG  = os.environ.get("HONEYTOKEN_FLAG", "HONEYTOKEN0000000000000000000=")
@@ -158,6 +160,24 @@ def scan_pcap_for_flags(pcap_path: Path, rdb: redis.Redis):
                                 "ts_packet": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
                                 "hops": hops,
                             }
+                    # Flags that only appear AFTER decoding (base64/gzip/xor/...
+                    # exfil) — the raw .findall above cannot see these. The cheap
+                    # looks_encoded() gate keeps the engine off plain packets so
+                    # a whole pcap still scans fast. Per-packet, so a payload
+                    # split across TCP segments won't reassemble here (Tulip is
+                    # the place for that); single-packet encoded exfil is caught.
+                    if decoders.looks_encoded(payload):
+                        known = set(FLAG_RE.findall(payload))
+                        for fnd in decoders.find_flags(payload, FLAG_RE, known=known, budget=0.2):
+                            for m in fnd.flags:
+                                key = ("flag-out", m.decode(errors="replace"))
+                                hops = found.get(key, {}).get("hops", 0) + 1
+                                found[key] = {
+                                    "src_ip": socket.inet_ntoa(ip.src), "src_port": seg.sport,
+                                    "dst_ip": socket.inet_ntoa(ip.dst), "dst_port": seg.dport,
+                                    "ts_packet": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+                                    "hops": hops, "decoded_via": fnd.path,
+                                }
                 except Exception:
                     continue
     except Exception as e:
@@ -204,9 +224,10 @@ def scan_pcap_for_flags(pcap_path: Path, rdb: redis.Redis):
             ctx.append(f"requester ML: {info['requester_ml']}")
         except Exception:
             pass
+        via = f" [decoded: {info['decoded_via']}]" if info.get("decoded_via") else ""
         push_alert(rdb, {
             "type": "flag-out", "confidence": "HIGH", "flag": flag, "pcap": pcap_path.name,
-            "message": f"Flag leaving service to {info['dst_ip']}: {flag}{hops} — {'; '.join(ctx)}. "
+            "message": f"Flag leaving service to {info['dst_ip']}: {flag}{hops}{via} — {'; '.join(ctx)}. "
                        "Checker reads also look like this: open the flow and judge the REQUEST.",
             **info,
         })

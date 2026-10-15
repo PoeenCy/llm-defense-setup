@@ -18,7 +18,7 @@ log "Stopping CTF Monitor Hub..."
 
 # Stop hub services (both zones — see header comment)
 cd "$SCRIPT_DIR"
-docker compose -f docker-compose.contest.yml -f docker-compose.prep.yml down 2>&1 | tail -3 || true
+docker compose --profile flagtrace -f docker-compose.contest.yml -f docker-compose.prep.yml down 2>&1 | tail -3 || true
 ok "Hub services stopped (contest + prep)"
 
 # Stop Tulip — must pass the same -f overlay bringup.sh used to start it, or

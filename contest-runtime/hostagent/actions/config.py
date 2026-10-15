@@ -1,6 +1,8 @@
 """Config tab: edit services.json from the dashboard, safely."""
 import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -11,7 +13,7 @@ from ..common import CONFIG_PATH, ROOT, audit, run, stamp
 BACKUPS = ROOT / "config-backups"
 REDEPLOY_LOG = ROOT / ".redeploy-from-dashboard.log"
 # containers that read services.json only at startup (mounted read-only)
-READS_CONFIG_AT_START = ["ctf-detection", "ctf-watchdog", "ctf-ml-fingerprint"]
+READS_CONFIG_AT_START = ["ctf-detection", "ctf-watchdog"]
 
 
 def _validate_text(text: str) -> tuple[bool, str]:
@@ -58,11 +60,25 @@ def apply(payload, rdb):
     # config) and recreates containers whose settings changed; then restart the
     # ones that only read services.json at startup. Runs detached: it may
     # restart this dashboard, so the request can't wait for it.
-    restart_cmd = " ; ".join(f"docker restart {c}" for c in READS_CONFIG_AT_START)
-    script = f"cd {ROOT} && bash bringup.sh && {restart_cmd} ; echo REDEPLOY_DONE"
+    updated = json.loads(text)
+    containers = list(READS_CONFIG_AT_START)
+    flagtrace = updated.get("flagtrace") or {}
+    if flagtrace.get("enabled"):
+        containers.append("ctf-flagtrace")
+        # Only when enabled: bringup.sh has just stopped a disabled worker, and
+        # restarting it here would bring it back.
+        if (flagtrace.get("trace") or {}).get("enabled"):
+            containers.append("ctf-flagtrace-worker")
+    mode = os.environ.get("MODE", "contest")
+    if mode not in ("contest", "prep"):
+        return {"ok": False, "output": "Invalid MODE; config saved but redeploy refused"}
+    if mode == "prep" and updated.get("ml_classifier", {}).get("enabled"):
+        containers.append("ctf-ml-fingerprint")
+    restart_cmd = " && ".join(f"docker restart {c}" for c in containers)
+    script = f"cd {shlex.quote(str(ROOT.parent))} && MODE={mode} bash bringup.sh && {restart_cmd} && echo REDEPLOY_DONE"
     with open(REDEPLOY_LOG, "w") as log:
         subprocess.Popen(["bash", "-c", script], stdout=log, stderr=subprocess.STDOUT,
-                         start_new_session=True, cwd=str(ROOT))
+                         start_new_session=True, cwd=str(ROOT.parent))
     return {"ok": True, "output": f"Saved (backup {ts}). Re-deploying in the background — the page may "
                                   "disconnect for ~1-2 min while containers restart. Progress: 'Show redeploy log'."}
 

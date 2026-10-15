@@ -12,6 +12,11 @@ offline-bundle/repos/ctf_proxy/proxy/config/config.json
 # (suricata.yaml, classification.config, etc. are copied in by the container
 # at startup — only lib/rules/suricata.rules is a real source file).
 traffic/*.pcap
+traffic/*.pcap.ready
+traffic/.incoming/
+data/flagtrace/
+contest-runtime/monitor/.capture-session.json
+contest-runtime/flagtrace/transport/flagtrace-transport
 contest-runtime/detection/suricata/log/
 contest-runtime/detection/suricata/etc/
 contest-runtime/detection/suricata/lib/*
@@ -32,6 +37,7 @@ __pycache__/
 *.log
 .DS_Store
 .host-agent.log
+.host-agent.pid
 .status-pusher.log
 contest-runtime/monitor/.capture-pull.*
 contest-runtime/detection/suricata/lib/rules/backups/
