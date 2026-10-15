@@ -111,6 +111,12 @@ thống đã có cơ chế dự phòng cho ca này (xem khung "Honeytoken/OS-wat
 monitor?" ở Bước 2), **không cần làm gì thêm**, chỉ cần biết để không hoang mang khi thấy cảnh
 báo "vulnbox can NOT reach..." lúc deploy.
 
+**Nếu nghi ngờ rộng hơn — không chỉ riêng `monitor_host.ip`, mà cả firewall/router của BTC
+(pfSense hoặc tương đương) có thể cấu hình khác giả định (chặn chiều khác, NAT trỏ sai đích,
+mất IP nguồn thật...)** — xem mục mới **"Khi firewall/router của BTC cấu hình khác giả định"**
+trong `docs/RUNBOOK.md` (phần Troubleshooting): quy trình tự chẩn đoán từng trường hợp cụ thể,
+kèm danh sách chính xác những port cần hỏi BTC mở sẵn.
+
 ### Bước 1 — Sửa `contest-runtime/config/services.json`
 
 ```bash

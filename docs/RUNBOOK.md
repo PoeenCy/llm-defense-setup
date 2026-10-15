@@ -561,15 +561,128 @@ investigation.
   honeytoken alert's `src_ip` is the gateway, not the attacker.)
 
 **8. Every control-plane port was listening on 0.0.0.0 (reachable from the competition VPN)**
-- Fixed: compose ports bind `${BIND_IP}` (services.json `monitor_host.bind_ip`, default
-  127.0.0.1). `contest-runtime/config/generators/gen-tulip-env.py` re-applies the same to Tulip's upstream compose
-  files on every run. Only port 9999 (honeytoken + OS-watchdog intake) is public.
-  Check any time: `ss -ltn | grep -v 127.0.0.1`
+- Fixed: Dashboard (8080) and Tulip web UI (3000) bind `${BIND_IP}` (services.json
+  `monitor_host.bind_ip`, default `127.0.0.1`, intentionally settable to a LAN IP so teammates
+  can open them -- see `CONFIG.md`). Redis, the detection admin/test API, and Tulip's Postgres
+  are hardcoded to `127.0.0.1` in `docker-compose.contest.yml` / patched that way by
+  `gen-tulip-env.py` and do **not** follow `bind_ip` at all (fixed 2026-10-16 -- they used to,
+  which meant opening the Dashboard to a LAN also handed out the alert queue, `/test/inject-flag`,
+  and the raw flow database). Only port 9999 (honeytoken + OS-watchdog intake) is public by
+  design. Check any time: `ss -tlnp | grep -vE '127\.0\.0\.1|:9999 '` -- anything left should be
+  `BIND_IP`'s own address (8080/3000) or something outside this repo entirely (see the next
+  section if an organizer-side firewall is also in the picture).
 
 **5. ctf_proxy's nginx container stuck with no network attached**
 - See the "Known gotcha" note under "Deploying ctf_proxy Against a Real
   Vulnbox" above. Short version: `docker rm -f` the nginx container and
   `docker compose up -d nginx` again; a plain `restart` does not fix it.
+
+### Khi firewall/router của BTC (pfSense hoặc tương đương) cấu hình khác giả định
+
+Mọi thứ trong repo này (`ctf_proxy`, capture, honeytoken, OS-watchdog) đứng **sau** một thiết bị
+mạng do ban tổ chức quản lý — thường là pfSense hoặc tương tự, làm NAT/port-forward/firewall
+giữa "mạng ngoài" (nơi checker + đối thủ ở) và vulnbox/mạng team. **Mình không cấu hình được cái
+đó, chỉ có thể TEST để biết nó đang xử lý traffic kiểu gì**, rồi thích nghi — không đoán. Mục
+này cho một quy trình tự chẩn đoán, không cần tôi ngồi cạnh.
+
+Nguyên tắc chung: *mọi container/service bên mình "lên" (`docker ps` xanh hết) không có nghĩa
+traffic thật sự đi qua đúng đường*. Luôn test bằng traffic thật qua đúng port public, không chỉ
+tin vào trạng thái container.
+
+**1. NAT reflection / hairpin — lỗi pfSense kinh điển nhất trong hạ tầng CTF**
+
+Triệu chứng: checker (chạy từ máy chấm điểm, ngoài mạng team) thấy service UP bình thường, nhưng
+tự mình `curl` vào chính IP/port public của mình (từ MÁY TRONG CÙNG MẠNG team, hoặc từ chính
+vulnbox) lại timeout/refused — dù service chạy tốt khi test qua `localhost`/IP nội bộ.
+
+```bash
+# Từ bên trong mạng team (vulnbox hoặc máy monitor), test đúng IP/port PUBLIC,
+# không phải IP nội bộ:
+curl -m 5 http://<IP public của vulnbox>:<port public>/
+```
+
+Nếu timeout/refused dù service chạy tốt qua IP nội bộ: pfSense có setting tên **"NAT
+Reflection"** (hoặc "hairpin NAT") đang tắt — traffic từ TRONG mạng gửi tới IP PUBLIC của chính
+mạng đó không được NAT phản hồi lại vào trong, dù traffic từ NGOÀI vào vẫn bình thường. Đây
+**không phải lỗi của mình**, và checker thật (luôn ở ngoài mạng team) **không bị ảnh hưởng gì**
+— chỉ gây nhiễu khi TỰ mình test. Nếu cần tự test từ trong mạng, test qua IP/port NỘI BỘ thay vì
+IP public, hoặc nhờ ai ở ngoài mạng team test giúp.
+
+**2. Hướng kết nối một chiều — đã gặp thật (xem `docs/STATUS.md` 2026-10-16)**
+
+Đừng bao giờ coi "SSH monitor→vulnbox chạy được" là bằng chứng "mọi hướng kết nối đều ổn". SSH
+chỉ chứng minh ĐÚNG MỘT hướng. Honeytoken/OS-watchdog cần hướng ngược lại (vulnbox→monitor) —
+**hai bài test độc lập, không suy ra từ nhau được**. Quy trình test chuẩn (đã dùng thật):
+
+```bash
+# Hướng monitor -> vulnbox (SSH, capture, ctf_proxy deploy đều cần cái này):
+ssh <vulnbox_ssh_alias> echo ok
+
+# Hướng vulnbox -> monitor (honeytoken/OS-watchdog push cần cái này) --
+# dựng một listener tạm, KHÔNG liên quan tới service nào đang chạy, để loại
+# trừ khả năng do port/container cụ thể nào đó bị chặn riêng:
+python3 -m http.server 19999 --bind 0.0.0.0 &     # chạy TRÊN máy monitor
+ssh <vulnbox_ssh_alias> "curl -m 5 http://<IP máy monitor>:19999/"
+kill %1                                            # dọn ngay sau khi test
+```
+
+Timeout ở bài test 2 (không phải "connection refused" — refused nghĩa là tới được, chỉ không ai
+nghe) = firewall/router chặn chiều đó, không phải lỗi service. Hệ thống đã có cơ chế dự phòng
+cho đúng tình huống này (honeytoken/OS-watchdog tự chuyển sang kiểu hỏi-ngược qua SSH, xem
+`contest-runtime/hostagent/oswatchdog_pull.py` / `honeytoken_pull.py`) — **không cần sửa gì cả**,
+chỉ cần biết để không hoảng khi thấy cảnh báo "can NOT reach" lúc deploy.
+
+**3. ctf_proxy "mất tích" dù vẫn chạy — port-forward trỏ sai đích**
+
+`ctf_proxy` hoạt động bằng cách CHIẾM đúng port public mà service gốc từng bind, trên CHÍNH máy
+vulnbox — nó không tự "chen" vào giữa đường truyền ở tầng mạng. Nếu pfSense's NAT rule được cấu
+hình trỏ cứng vào một IP nội bộ cụ thể (ví dụ IP riêng của container service gốc) từ trước khi
+ctf_proxy được cài, thay vì trỏ vào IP của HOST vulnbox, traffic vẫn có thể đi tắt tới thẳng
+service gốc, **bỏ qua hoàn toàn ctf_proxy** — rule chặn build xong, apply xong, báo thành công,
+nhưng thực tế không chặn được gì vì traffic chưa từng đi qua.
+
+```bash
+# Xác nhận traffic qua port public THỰC SỰ tới đúng process ctf_proxy, không
+# phải thẳng tới service gốc:
+ssh <vulnbox_ssh_alias> "ss -tlnp | grep ':<port public> '"
+# phải thấy process ctf_proxy (nginx/proxy container), không phải service gốc
+
+# Test thật: gửi 1 request chứa chuỗi mà ctf_proxy ĐANG chặn, qua đúng IP/port
+# PUBLIC (không phải localhost trên vulnbox) -- nếu service vẫn trả response
+# bình thường (không bị khoá/đóng kết nối) dù rule báo "đã áp dụng", traffic
+# không đi qua ctf_proxy.
+```
+
+Nếu phát hiện đúng trường hợp này: báo BTC port-forward đang trỏ sai đích (vào IP container cụ
+thể thay vì IP host), hoặc dùng "Fallback block — theo NỘI DUNG" (tab SERVICES, iptables trên
+chính vulnbox, không phụ thuộc NAT của BTC) làm phương án tạm trong lúc chờ sửa.
+
+**4. Source IP bị NAT/masquerade mất, không còn là IP thật của kẻ tấn công**
+
+Nếu pfSense (hoặc router giữa các team) làm NAT nguồn (masquerade) traffic giữa các team với
+nhau, mọi traffic tới vulnbox của mình có thể trông như xuất phát từ MỘT IP duy nhất (IP NAT của
+router) bất kể đội nào thật sự gửi — giống hệt vấn đề đã gặp với rootless podman (RUNBOOK mục 7
+ở trên, netns gateway thay cho IP khách thật). Dấu hiệu: `teams_cidr` trong `services.json` không
+còn phân biệt được gì, mọi honeytoken/watchdog alert đều ghi cùng một `src_ip`.
+
+Không có cách tự sửa từ phía mình (NAT xảy ra ở thiết bị của BTC) — nếu nghi ngờ đúng trường hợp
+này, đừng dựa vào so khớp IP nguồn để phân biệt checker/đồng minh/đối thủ; ưu tiên chặn/nhận diện
+theo **nội dung request** (đã có sẵn: multi-condition ctf_proxy rule, Suricata content-match) hơn
+là theo IP.
+
+**5. Danh sách port cần hỏi BTC mở sẵn (chuẩn bị trước khi vào mạng thi)**
+
+Nếu nghi pfSense của giải chặn mặc định (default-deny) những gì không được khai báo trước, đây
+là toàn bộ danh sách port **thực sự** cần cho hệ thống này hoạt động — không hơn:
+
+| Port/hướng | Ai cần nó | Nếu bị chặn |
+|---|---|---|
+| Port service public (`services[].port`), hướng ngoài→vulnbox | Traffic game thật (checker + đối thủ) | Hầu như không bao giờ bị chặn — đây là chính service đang thi; nếu bị chặn thì không ai chấm điểm được, báo BTC ngay |
+| SSH tới vulnbox (`vulnbox.ssh_port` hoặc alias của `capture_ssh_alias`), hướng monitor→vulnbox | Capture, ctf_proxy deploy, honeytoken/OS-watchdog deploy, cơ chế pull mới | Gần như luôn mở (team tự quản lý vulnbox của mình); nếu không SSH được, mọi tính năng ở Phase 1/2 trong `docs/GOLIVE.md` đều không chạy được |
+| Port 9999, hướng vulnbox→monitor | Honeytoken/OS-watchdog push (không bắt buộc — đã có cơ chế pull thay thế) | Không cần báo BTC mở riêng — hệ thống tự hoạt động qua cơ chế pull dù hướng này bị chặn (đã test thật, xem mục 2 trên) |
+
+Không có port nào khác cần BTC mở thêm cho repo này — mọi thứ còn lại (Dashboard, Tulip, Redis,
+API quản trị) chỉ chạy nội bộ trên máy monitor, không đi qua mạng thi.
 
 ---
 
