@@ -5,8 +5,8 @@
 **Single-machine situational-awareness stack for Attack-Defense CTF competitions.**
 
 Edge mitigation, deterministic flag-exfiltration detection, and SLA watchdogs — all driven
-from one config file. No LLM/generative-AI path exists in this repo (removed — see
-`docs/STATUS.md`); the optional `ml-fingerprint` classifier (sklearn, non-generative) is the
+from one config file. No LLM/generative-AI path exists in this repo (removed by explicit
+decision); the optional `ml-fingerprint` classifier (sklearn, non-generative) is the
 only model-adjacent component, and it's off by default.
 
 [![Python](https://img.shields.io/badge/python-3.11-blue)](https://www.python.org/)
@@ -16,7 +16,7 @@ only model-adjacent component, and it's off by default.
 **→ [CONFIG.md](CONFIG.md) — need to change a port/IP/config RIGHT NOW mid-competition? Start there, not here.**  
 **→ [AGENTS.md](AGENTS.md) — bạn (hoặc agent của bạn) vừa clone repo này? Đọc file đó trước.**
 
-[Architecture](docs/ARCHITECTURE.md) · [Runbook](docs/RUNBOOK.md) · [Config schema](docs/SCHEMA.md) · [Verified status](docs/STATUS.md) · [Demo script](docs/DEMO.md) · [Go live on competition day](docs/GOLIVE.md)
+[Architecture](docs/ARCHITECTURE.md) · [Runbook](docs/RUNBOOK.md) · [Config schema](docs/SCHEMA.md) · [Go live on competition day](docs/GOLIVE.md)
 
 </div>
 
@@ -79,8 +79,8 @@ flowchart TD
     MLFP -.->|hints only| Dashboard
 ```
 
-No LLM / generative-AI path exists anywhere in this repo (removed by explicit decision — see
-`docs/STATUS.md`). Two layers do the actual work, plus an optional non-generative hint layer:
+No LLM / generative-AI path exists anywhere in this repo (removed by explicit decision). Two
+layers do the actual work, plus an optional non-generative hint layer:
 
 1. **Edge mitigation** — [`ctf_proxy`](https://github.com/ByteLeMani/ctf_proxy) (a real
    upstream project, not reinvented) sits in front of **every TCP service** listed in
@@ -143,9 +143,8 @@ reference: [`docs/SCHEMA.md`](docs/SCHEMA.md).
 
 ## What's actually verified
 
-Every claim in this README has been run and checked on real traffic, not just coded — see
-[`docs/STATUS.md`](docs/STATUS.md) for the evidence log (commands, output, root causes of the
-bugs found along the way) and what's still a known rough edge.
+Every claim in this README has been run and checked on real traffic against a real vulnbox,
+not just coded.
 
 ## Repo layout
 

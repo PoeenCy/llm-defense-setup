@@ -1,102 +1,104 @@
-# INVENTORY.md — Item A: full component audit (pre-rebuild)
+# INVENTORY.md — Item A: kiểm kê toàn bộ thành phần (trước khi tái cấu trúc)
 
-> Produced before any files were moved, per SPEC build order (A → B → C → …).
-> Every top-level directory and every `docker-compose.yml` service is tagged:
-> **legal-runtime** (non-AI, allowed in contest mode) · **AI/prep-only** (must be
-> quarantined, never started in contest mode) · **dead/remove** (stale, no longer
-> used) · **ambiguous** (needs an explicit call before Item C moves it).
+> Được lập ra trước khi di chuyển bất kỳ file nào, theo đúng thứ tự xây dựng trong SPEC (A → B → C → …).
+> Mỗi thư mục cấp cao nhất và mỗi service trong `docker-compose.yml` đều được gắn nhãn:
+> **legal-runtime** (không phải AI, được phép chạy ở contest mode) · **AI/prep-only** (phải bị
+> cách ly, không bao giờ khởi động ở contest mode) · **dead/remove** (đã cũ, không còn dùng) ·
+> **ambiguous** (cần quyết định rõ ràng trước khi Item C di chuyển nó).
 >
-> Grep basis: `ollama|transformers|torch|llama.cpp|vllm|anythingllm|openai|mcp|llm`
-> across all source files (excluding `offline-bundle/`, `.git/`), plus `mongo`
-> across the same set. Full greps run during this audit; evidence below quotes
-> the hits that mattered.
+> Cơ sở grep: `ollama|transformers|torch|llama.cpp|vllm|anythingllm|openai|mcp|llm`
+> trên toàn bộ source file (trừ `offline-bundle/`, `.git/`), cộng thêm `mongo`
+> trên cùng tập đó. Đã chạy grep đầy đủ trong lúc kiểm kê; bằng chứng dưới đây trích dẫn
+> những kết quả khớp có ý nghĩa.
 
-## Legend
+## Chú giải
 
-| Tag | Meaning |
+| Tag | Ý nghĩa |
 |---|---|
-| **legal** | No AI/model dependency found. Belongs under `contest-runtime/`. |
-| **AI** | Invokes or exists only to serve a generative model / MCP-to-LLM path. Belongs under `prep-only/`. |
-| **dead** | Stale reference (old Mongo-based design, unrelated stray artifact). Remove. |
-| **ambiguous** | Not generative, but touches "AI/ML" under the contest's literal wording, or has no single obvious zone. Flagged for an explicit decision, not moved yet. |
+| **legal** | Không tìm thấy phụ thuộc AI/model nào. Thuộc về `contest-runtime/`. |
+| **AI** | Gọi hoặc chỉ tồn tại để phục vụ một model generative / đường dẫn MCP-tới-LLM. Thuộc về `prep-only/`. |
+| **dead** | Tham chiếu đã cũ (thiết kế dựa trên Mongo cũ, hoặc artifact lạc loài không liên quan). Cần xoá. |
+| **ambiguous** | Không phải generative, nhưng chạm vào "AI/ML" theo đúng nghĩa chữ của điều lệ giải, hoặc không có một vùng (zone) rõ ràng duy nhất để xếp vào. Đánh dấu để chờ quyết định rõ ràng, chưa di chuyển. |
 
 ---
 
-## Top-level directories
+## Các thư mục cấp cao nhất
 
-| Path | Tag | Evidence / notes |
+| Đường dẫn | Tag | Bằng chứng / ghi chú |
 |---|---|---|
-| `dashboard/` | **legal**, with one **AI**-touching route | FastAPI app (`main.py`, `routes/*.py`, `rulegen/*.py`), static UI (`static/`). No ollama/torch import anywhere in `dashboard/app/`. One exception: `dashboard/app/routes/analyze.py` (24 lines) calls out to `ioc-brain` (`IOC_API_URL` env) for the "Analyze"/rule-generation-from-LLM feature. The route itself does no inference — it's an HTTP client to the quarantined service. **Decision needed for Item D/E**: in `MODE=contest` this route must either be absent from the compose/image, or return a clear "disabled in contest mode" response, and the matching UI control (static/js) must be hidden — see Item D acceptance ("no effect in contest mode regardless of flag"). |
-| `detection/` | **legal** | `detection_service.py` — flag-out regex (`FLAG_REGEX` env), honeytoken HTTP collector, Suricata `eve.json` ingester. Pure stdlib + `redis`/`fastapi`/`dpkt`/`scapy`. No AI imports. → `contest-runtime/detection/`. |
-| `watchdog/` | **legal** | `watchdog_service.py` — SLA prober (socket connect/timeout timing) reading `services.json`. No AI imports. → `contest-runtime/watchdog/`. |
-| `hostagent/` + root `host_agent.py` | **legal** | The one long-running **host** (non-container) process: pushes status every 15s, executes a whitelisted action set (`actions/{config,ctfproxy,firewall,services,suricata}.py`) requested by the dashboard over a Redis queue (`ops_requests`). Deterministic command execution only (docker/systemctl/file writes), no AI. → `contest-runtime/` (co-located with `dashboard/` and `watchdog/`, since it's the host-side executor for both — exact subfolder is an Item C placement call, not yet moved). |
-| `generators/` | **legal** | `gen-ctfproxy.py`, `gen-tulip-env.py` — pure config templating from `services.json`. → `contest-runtime/config/`. |
-| `services.json`, `validate-config.sh` | **legal** | Central config + validator. Already has no Mongo field (see Dead section) and an `mcp.*` section (see Ambiguous — the `mcp` section here is Tulip-Postgres-only info consumed by `mcp-tulip/`, which is itself tagged AI below because its only consumer is `ioc-brain`). → `contest-runtime/config/`. |
-| `suricata/` | **legal** | IDS config/rules/log dirs (`etc/`, `lib/rules/`, `log/`) — rule-based, no AI. → `contest-runtime/detection/` or `monitor/` (placement call in Item C). |
-| `rules-library/` | **legal** | Ready-to-enable rule templates: `ctfproxy/*.py` (block methods, fail-open, content-matched), `suricata/*.rules` (3260 lines total across 15 files — 12 hand-written categories + 3 ET-style response/web-server/exploit files), `nginx/block-rules.conf`. All deterministic pattern matching. → `contest-runtime/defense/` (ctfproxy + nginx) and `contest-runtime/detection/` (suricata) — currently one directory serving both zones, needs a split in Item C. |
-| `vulnbox-deploy/` | **legal** | `deploy-capture.sh`, `deploy-capture-pull.sh` (tcpdump+pcap pull), `deploy-honeytoken.sh`, `deploy-ctfproxy.sh` (opt-in proxy insertion in front of a live service, re-verifies every precondition over SSH, never edits the target's own files), `deploy-os-watchdog.sh` + `os-watchdog-agent.sh` (process/conn/file-hash/cron drift agent, runs ON the vulnbox host, reports to monitor). All deterministic shell, no AI. → split across `contest-runtime/monitor/` (capture), `contest-runtime/detection/` (honeytoken), `contest-runtime/defense/` (ctfproxy insertion), `contest-runtime/watchdog/` (os-watchdog). |
-| `traffic/` | **legal** (runtime data, not code) | pcap capture landing dir, gitignored except retention. Stays wherever `monitor/` ends up. |
-| `vault/` | **AI** | Only ever mounted into `ioc-brain` and `anythingllm` (`docker-compose.yml` volumes) as the RAG document source. Gitignored except `.gitkeep`. → `prep-only/ai-ioc/vault/`. |
-| `config-backups/` | **legal** (runtime data) | Written by `hostagent/actions/config.py` on every config apply (rollback support). Not code — stays with wherever config/hostagent land. |
-| `bringup.sh`, `deploy-all.sh`, `teardown.sh` | **legal**, needs rework | Orchestration entrypoints. Currently start **everything** unconditionally, including `ioc-brain`/`mcp-tulip`/`anythingllm` (see `docker-compose.yml` evidence below) and have no `MODE` concept at all — this is the Item B gap. Also contains the only comment admitting the Mongo language is stale: `bringup.sh:14` *"Safety: read-only MongoDB."* (dead comment, Tulip is Postgres — see Dead section). |
-| `health_check.py`, `health-check.sh` | **legal** | Status probes consumed by `hostagent`'s status loop and the dashboard. No AI. |
-| `mock-vulnbox/` | **ambiguous** | Toy vulnerable app (`svc1_http.py`, `svc2_tcp.py`, plain `python:3.11-slim`, no AI). Used only for local rehearsal before competition day (`services.json.mock_vulnbox.enabled`, default `false`); `bringup.sh` already skips it when disabled. It is not part of the real contest defense stack and isn't listed anywhere in the SPEC's `contest-runtime/` zones. **Recommendation**: move to `prep-only/training/` (practice/rehearsal use, matches §1's description of that zone) rather than `contest-runtime/`, since it exists purely to exercise the pipeline, not to defend anything during the real 8 hours. Flagging for explicit confirmation before Item C moves it, since this changes `bringup.sh`'s current behavior (it's currently reachable in contest mode, just disabled by a flag, not physically absent). |
-| `ioc-brain/` | **AI** | `ioc_api.py` — `import ollama`, calls `ollama_lib.AsyncClient(...).chat(model=LLM_MODEL, ...)` (`ioc_api.py:158,171`); ships `Foundation-Sec.Modelfile` (Ollama model build file). This is the generative LLM analysis endpoint (`/analyze`, `/generate-rule`). → `prep-only/ai-ioc/`. |
-| `mcp-tulip/` | **AI** | MCP server (`from mcp.server.fastmcp import FastMCP`, `mcp_server.py:16`) exposing read-only Postgres access. Does no inference itself, but its **only** caller anywhere in the repo is `ioc-brain` (`MCP_URL` in `ioc_api.py:53`, `fetch_flow_from_mcp`) — nothing in `detection/`, `watchdog/`, or `dashboard/` talks to it. Per the SPEC's own grep list (`ollama/transformers/torch/mcp/llm`), MCP itself is treated as AI-adjacent, and since it exists solely to feed the quarantined LLM, it has no standalone reason to stay in `contest-runtime/`. → `prep-only/ai-ioc/`. |
-| `llm-host/` | **AI** | `setup-llm-host.sh` — installs/configures Ollama + builds the Foundation-Sec model on a **separate dedicated machine**. Not part of `docker-compose.yml` (no service), but it's pure AI-host bootstrap tooling. → `prep-only/ai-ioc/` (or `prep-only/ai-ioc/llm-host/` to keep the "run this on a different machine" framing intact). |
-| `ml-fingerprint/` | **ambiguous — flagged for explicit ruling** | `fingerprint_service.py`: `from sklearn.cluster import DBSCAN`, `from sklearn.preprocessing import StandardScaler` (lines 36-37). Online unsupervised clustering of L3/L4 flow features (inter-arrival time, packet size, handshake flags) to flag traffic that deviates from the checker-bot cluster — explicitly a **hint-only** layer, never auto-blocks (`fingerprint_service.py:16-20`). This is **not** generative AI and is **not** deep learning (no `torch`/`transformers`), so it doesn't trip the SPEC's explicit dependency list in Item 3's compliance check. However, the contest's hard constraint in §0 reads *"no AI may execute... including local AI/ML models"* — DBSCAN is a textbook ML model. **Recommendation**: treat this as exactly the "optional ML classifier" the SPEC's own `prep-only/ml-classifier/` zone anticipates (§1, Item D) — default OFF, config-gated (`enable_ml_classifier`), absent from the contest compose, requiring BTC confirmation in writing to enable. This loses a currently-working detection signal from the default contest stack unless BTC explicitly signs off; raising it now rather than deciding unilaterally, since Item F's acceptance criteria don't mention it and STATUS.md itself notes *"ml-fingerprint full acceptance — still separate/in-progress"* (not yet a proven, load-bearing signal). |
-| `offline-bundle/` | **mixed, needs rebuild** | Gitignored, regenerable via `pull-and-save.sh`. Currently bundles **everything** together (Tulip/ctf_proxy/pcap-broker repos, redis/nginx/mysql/php images for mock services, **and** `mintplexlabs/anythingllm`, `ollama` wheel, near-empty `ollama-models/` (4KB — model blobs aren't actually captured yet, so today's "offline AI bundle" doesn't even work), plus dead Mongo artifacts — see below). Item I requires this split: a legal-only offline bundle for `contest-runtime`, and a separate prep-only bundle (or an explicit `--with-ai` flag) for `prep-only`. |
-| `docs/` | **mixed** | `ARCHITECTURE.md`, `DASHBOARD_GUIDE.md`, `GOLIVE.md`, `RUNBOOK.md`, `SCHEMA.md`, `STATUS.md`, `RULE_COOKBOOK.md`, `DEMO.md` — all describe the legal stack (DEMO.md also has known factual drift from STATUS.md, unrelated to this spec). `REMOTE_LLM.md` is AI-only (dedicated Ollama host doc) → should move or be clearly marked as a `prep-only` doc. |
-| `__pycache__/` (root) | **dead** | Build artifact, already gitignored; delete on sight, not a real component. |
+| `dashboard/` | **legal**, có một route chạm **AI** | App FastAPI (`main.py`, `routes/*.py`, `rulegen/*.py`), UI tĩnh (`static/`). Không có import ollama/torch nào trong `dashboard/app/`. Một ngoại lệ: `dashboard/app/routes/analyze.py` (24 dòng) gọi ra `ioc-brain` (env `IOC_API_URL`) cho tính năng "Analyze"/sinh-rule-từ-LLM. Route này tự nó không suy luận gì — nó chỉ là một HTTP client gọi tới service đã bị cách ly. **Cần quyết định cho Item D/E**: ở `MODE=contest`, route này phải hoặc không có mặt trong compose/image, hoặc trả về rõ ràng response "disabled in contest mode", và nút điều khiển UI tương ứng (static/js) phải bị ẩn — xem tiêu chí nghiệm thu của Item D ("không có tác dụng gì ở contest mode bất kể cờ bật/tắt"). |
+| `detection/` | **legal** | `detection_service.py` — regex flag-out (env `FLAG_REGEX`), bộ thu thập HTTP honeytoken, bộ ingest `eve.json` của Suricata. Thuần stdlib + `redis`/`fastapi`/`dpkt`/`scapy`. Không có import AI nào. → `contest-runtime/detection/`. |
+| `watchdog/` | **legal** | `watchdog_service.py` — bộ dò SLA (đo thời gian connect/timeout socket) đọc `services.json`. Không có import AI nào. → `contest-runtime/watchdog/`. |
+| `hostagent/` + `host_agent.py` ở root | **legal** | Tiến trình **host** (không phải container) chạy liên tục duy nhất: đẩy status mỗi 15s, thực thi một tập hành động đã whitelist (`actions/{config,ctfproxy,firewall,services,suricata}.py`) được dashboard yêu cầu qua hàng đợi Redis (`ops_requests`). Chỉ thực thi lệnh xác định (docker/systemctl/ghi file), không AI. → `contest-runtime/` (đặt cùng với `dashboard/` và `watchdog/`, vì nó là bộ thực thi phía host cho cả hai — vị trí thư mục con chính xác là quyết định của Item C, chưa di chuyển). |
+| `generators/` | **legal** | `gen-ctfproxy.py`, `gen-tulip-env.py` — chỉ templating config thuần từ `services.json`. → `contest-runtime/config/`. |
+| `services.json`, `validate-config.sh` | **legal** | Config trung tâm + validator. Đã không còn field Mongo nào (xem mục Dead) và có một mục `mcp.*` (xem Ambiguous — mục `mcp` ở đây chỉ là thông tin Tulip-Postgres do `mcp-tulip/` tiêu thụ, và `mcp-tulip/` tự nó bị gắn tag AI dưới đây vì consumer duy nhất của nó là `ioc-brain`). → `contest-runtime/config/`. |
+| `suricata/` | **legal** | Các thư mục config/rule/log của IDS (`etc/`, `lib/rules/`, `log/`) — dựa trên rule, không AI. → `contest-runtime/detection/` hoặc `monitor/` (quyết định vị trí thuộc Item C). |
+| `rules-library/` | **legal** | Mẫu rule sẵn sàng để bật: `ctfproxy/*.py` (method chặn, fail-open, khớp theo nội dung), `suricata/*.rules` (tổng 3260 dòng trải trên 15 file — 12 nhóm viết tay + 3 file kiểu ET cho response/web-server/exploit), `nginx/block-rules.conf`. Tất cả đều là khớp mẫu xác định (deterministic). → `contest-runtime/defense/` (ctfproxy + nginx) và `contest-runtime/detection/` (suricata) — hiện đang là một thư mục phục vụ cả 2 vùng, cần tách ở Item C. |
+| `vulnbox-deploy/` | **legal** | `deploy-capture.sh`, `deploy-capture-pull.sh` (tcpdump+kéo pcap), `deploy-honeytoken.sh`, `deploy-ctfproxy.sh` (chèn proxy tùy chọn trước một service đang sống, tự xác minh lại mọi điều kiện tiên quyết qua SSH, không bao giờ sửa file của chính target), `deploy-os-watchdog.sh` + `os-watchdog-agent.sh` (agent phát hiện process/kết nối/hash-file/cron lệch, chạy NGAY TRÊN host vulnbox, báo về monitor). Toàn bộ là shell xác định, không AI. → chia vào `contest-runtime/monitor/` (capture), `contest-runtime/detection/` (honeytoken), `contest-runtime/defense/` (chèn ctfproxy), `contest-runtime/watchdog/` (os-watchdog). |
+| `traffic/` | **legal** (dữ liệu runtime, không phải code) | Thư mục nhận pcap capture, gitignore trừ phần retention. Ở cùng chỗ với `monitor/` sau khi di chuyển. |
+| `vault/` | **AI** | Chỉ được mount vào `ioc-brain` và `anythingllm` (volumes trong `docker-compose.yml`) làm nguồn tài liệu RAG. Gitignore trừ `.gitkeep`. → `prep-only/ai-ioc/vault/`. |
+| `config-backups/` | **legal** (dữ liệu runtime) | Được `hostagent/actions/config.py` ghi mỗi lần apply config (hỗ trợ rollback). Không phải code — ở cùng chỗ với config/hostagent sau khi di chuyển. |
+| `bringup.sh`, `deploy-all.sh`, `teardown.sh` | **legal**, cần viết lại | Các entrypoint điều phối. Hiện tại khởi động **mọi thứ** vô điều kiện, kể cả `ioc-brain`/`mcp-tulip`/`anythingllm` (xem bằng chứng `docker-compose.yml` dưới) và hoàn toàn không có khái niệm `MODE` — đây chính là lỗ hổng của Item B. Cũng có dòng comment duy nhất thừa nhận ngôn ngữ Mongo đã cũ: `bringup.sh:14` *"Safety: read-only MongoDB."* (comment đã chết, Tulip dùng Postgres — xem mục Dead). |
+| `health_check.py`, `health-check.sh` | **legal** | Các probe trạng thái được vòng lặp status của `hostagent` và dashboard tiêu thụ. Không AI. |
+| `mock-vulnbox/` | **ambiguous** | App dễ tổn thương giả (`svc1_http.py`, `svc2_tcp.py`, chỉ `python:3.11-slim`, không AI). Chỉ dùng để diễn tập cục bộ trước ngày thi (`services.json.mock_vulnbox.enabled`, mặc định `false`); `bringup.sh` đã bỏ qua nó khi tắt. Nó không thuộc stack phòng thủ thi thật và không được liệt kê ở bất kỳ vùng `contest-runtime/` nào trong SPEC. **Khuyến nghị**: chuyển vào `prep-only/training/` (dùng để luyện tập/diễn tập, khớp đúng mô tả vùng đó ở §1) thay vì `contest-runtime/`, vì nó chỉ tồn tại để chạy thử pipeline, không để phòng thủ gì trong 8 giờ thi thật. Đánh dấu chờ xác nhận rõ ràng trước khi Item C di chuyển, vì việc này đổi hành vi hiện tại của `bringup.sh` (hiện nó vẫn tồn tại ở contest mode, chỉ bị tắt bằng cờ, không bị gỡ vật lý). |
+| `ioc-brain/` | **AI** | `ioc_api.py` — `import ollama`, gọi `ollama_lib.AsyncClient(...).chat(model=LLM_MODEL, ...)` (`ioc_api.py:158,171`); đi kèm `Foundation-Sec.Modelfile` (file build model Ollama). Đây là endpoint phân tích LLM generative (`/analyze`, `/generate-rule`). → `prep-only/ai-ioc/`. |
+| `mcp-tulip/` | **AI** | MCP server (`from mcp.server.fastmcp import FastMCP`, `mcp_server.py:16`) cung cấp quyền đọc Postgres. Nó tự nó không suy luận gì, nhưng **nơi gọi nó duy nhất** trong toàn repo là `ioc-brain` (`MCP_URL` trong `ioc_api.py:53`, `fetch_flow_from_mcp`) — không có gì trong `detection/`, `watchdog/`, hay `dashboard/` nói chuyện với nó. Theo đúng danh sách grep của SPEC (`ollama/transformers/torch/mcp/llm`), MCP tự nó được coi là thuộc nhóm liên quan-AI, và vì nó chỉ tồn tại để nuôi LLM đã bị cách ly, nó không có lý do độc lập nào để ở lại `contest-runtime/`. → `prep-only/ai-ioc/`. |
+| `llm-host/` | **AI** | `setup-llm-host.sh` — cài/cấu hình Ollama + build model Foundation-Sec trên **một máy riêng biệt**. Không nằm trong `docker-compose.yml` (không có service), nhưng là tooling bootstrap AI-host thuần túy. → `prep-only/ai-ioc/` (hoặc `prep-only/ai-ioc/llm-host/` để giữ đúng tinh thần "chạy cái này trên máy khác"). |
+| `ml-fingerprint/` | **ambiguous — đánh dấu chờ quyết định rõ ràng** | `fingerprint_service.py`: `from sklearn.cluster import DBSCAN`, `from sklearn.preprocessing import StandardScaler` (dòng 36-37). Clustering không giám sát (unsupervised) trực tuyến trên đặc trưng flow L3/L4 (thời gian giữa các packet, kích thước packet, cờ handshake) để đánh dấu traffic lệch khỏi cụm bot-checker — rõ ràng là một lớp **chỉ gợi ý**, không bao giờ tự chặn (`fingerprint_service.py:16-20`). Cái này **không phải** generative AI và **không phải** deep learning (không có `torch`/`transformers`), nên nó không vướng vào danh sách phụ thuộc rõ ràng của SPEC trong bước kiểm tra tuân thủ ở Item 3. Tuy nhiên, điều lệ cứng của giải ở §0 viết *"không AI nào được chạy... kể cả model AI/ML cục bộ"* — DBSCAN đúng là một model ML kinh điển. **Khuyến nghị**: coi đây đúng là "bộ phân loại ML tùy chọn" mà vùng `prep-only/ml-classifier/` của chính SPEC đã dự tính (§1, Item D) — mặc định TẮT, có cờ config (`enable_ml_classifier`), không có mặt trong compose của contest, cần BTC xác nhận bằng văn bản mới được bật. Việc này làm mất một tín hiệu phát hiện đang hoạt động (dù chưa được nghiệm thu đầy đủ) khỏi stack contest mặc định, nên nêu ra ngay bây giờ thay vì tự quyết một mình, vì tiêu chí nghiệm thu của Item F không đề cập tới nó và STATUS.md tự nó ghi *"ml-fingerprint full acceptance — vẫn đang riêng/chưa xong"* (chưa phải tín hiệu đã được chứng minh, chịu trách nhiệm thật). |
+| `offline-bundle/` | **hỗn hợp, cần build lại** | Gitignore, tự sinh lại được qua `pull-and-save.sh`. Hiện đang gộp **mọi thứ** chung một chỗ (repo Tulip/ctf_proxy/pcap-broker, image redis/nginx/mysql/php cho service giả, **và** `mintplexlabs/anythingllm`, wheel `ollama`, thư mục `ollama-models/` gần như trống (4KB — model blob thực ra chưa được lưu, nên "bundle AI offline" hiện tại thậm chí không hoạt động), cộng thêm artifact Mongo đã chết — xem dưới). Item I yêu cầu tách ra: một bundle offline chỉ-legal cho `contest-runtime`, và một bundle prep-only riêng (hoặc một cờ `--with-ai` rõ ràng) cho `prep-only`. |
+| `docs/` | **hỗn hợp** | `ARCHITECTURE.md`, `DASHBOARD_GUIDE.md`, `GOLIVE.md`, `RUNBOOK.md`, `SCHEMA.md`, `STATUS.md`, `RULE_COOKBOOK.md`, `DEMO.md` — tất cả mô tả stack legal (DEMO.md cũng có sai lệch sự thật đã biết so với STATUS.md, không liên quan tới spec này). `REMOTE_LLM.md` là tài liệu chỉ-AI (tài liệu về dedicated Ollama host) → nên di chuyển hoặc đánh dấu rõ là tài liệu `prep-only`. |
+| `__pycache__/` (root) | **dead** | Artifact build, đã gitignore; xóa ngay khi thấy, không phải thành phần thật. |
 
-## `docker-compose.yml` services (single master file today — Item B/C splits this)
+## Service trong `docker-compose.yml` (hiện tại là một file master duy nhất — Item B/C sẽ tách file này)
 
-| Service | Tag | Evidence |
+| Service | Tag | Bằng chứng |
 |---|---|---|
-| `mock-vulnbox` | ambiguous (see above) | `docker-compose.yml:15-25` |
-| `redis` | legal | `docker-compose.yml:30-43` — shared alert/hint queue, no AI |
+| `mock-vulnbox` | ambiguous (xem trên) | `docker-compose.yml:15-25` |
+| `redis` | legal | `docker-compose.yml:30-43` — hàng đợi alert/hint chung, không AI |
 | `detection` | legal | `docker-compose.yml:48-76` |
-| `ml-fingerprint` | ambiguous (see above) | `docker-compose.yml:81-101` |
+| `ml-fingerprint` | ambiguous (xem trên) | `docker-compose.yml:81-101` |
 | `watchdog` | legal | `docker-compose.yml:106-123` |
-| `mcp-tulip` | **AI** | `docker-compose.yml:132-145` — joins `tulip-internal` network *only* to serve `ioc-brain` |
-| `ioc-brain` | **AI** | `docker-compose.yml:147-174` — `OLLAMA_HOST`, `LLM_MODEL`, `EMBED_MODEL`, `GPU_LAYERS` env; depends on `mcp-tulip` |
-| `dashboard` | legal (see analyze.py caveat above) | `docker-compose.yml:179-207` — `IOC_API_URL` env wires it to the quarantined service for one feature only |
+| `mcp-tulip` | **AI** | `docker-compose.yml:132-145` — join network `tulip-internal` *chỉ* để phục vụ `ioc-brain` |
+| `ioc-brain` | **AI** | `docker-compose.yml:147-174` — env `OLLAMA_HOST`, `LLM_MODEL`, `EMBED_MODEL`, `GPU_LAYERS`; phụ thuộc `mcp-tulip` |
+| `dashboard` | legal (xem lưu ý về analyze.py ở trên) | `docker-compose.yml:179-207` — env `IOC_API_URL` nối nó với service đã cách ly, chỉ cho một tính năng duy nhất |
 | `anythingllm` | **AI** | `docker-compose.yml:212-233` — `mintplexlabs/anythingllm:latest`, `LLM_PROVIDER=ollama` |
 
-**Today, `bringup.sh` has no gate at all** — every one of these (including `ioc-brain`, `mcp-tulip`, `anythingllm`) starts unconditionally. This is the single biggest compliance gap and is what Item B/D close.
+**Hiện tại `bringup.sh` hoàn toàn không có cổng chặn nào** — mọi service kể trên (bao gồm cả
+`ioc-brain`, `mcp-tulip`, `anythingllm`) đều khởi động vô điều kiện. Đây là lỗ hổng tuân thủ lớn
+nhất, và Item B/D sẽ khép lại nó.
 
-## Mongo remnants (to remove — Tulip has used Postgres/TimescaleDB for a while; `services.json`/`validate-config.sh` are already clean, these are the leftovers)
+## Tàn tích Mongo (cần xóa — Tulip đã dùng Postgres/TimescaleDB từ lâu; `services.json`/`validate-config.sh` đã sạch, đây là những gì còn sót lại)
 
-| Location | What | Action |
+| Vị trí | Là gì | Hành động |
 |---|---|---|
-| `pull-and-save.sh:38` | `"mongo:7.0"` in the image pull list | Remove — nothing in the stack runs Mongo |
-| `pull-and-save.sh:97` | `"pymongo>=4.7.0"` in the wheel list | Remove |
-| `offline-restore.sh:88` | `pymongo` in the pip install fallback line | Remove |
-| `offline-bundle/images/mongo_7.0.tar` | Stale pulled image (gitignored, local only) | Delete locally; stops being regenerated once the two lines above are removed |
-| `offline-bundle/wheels/pymongo-4.18.2-*.whl` | Stale wheel (gitignored, local only) | Delete locally |
-| `ioc-brain/ioc_api.py:9,13,48,50-52` | Comments *about* Mongo, explaining it's NOT used (MCP/Postgres replaced it) | No code change needed, but these comments move wholesale with the file into `prep-only/ai-ioc/` — fine as-is, already accurate |
-| `rules-library/ctfproxy/block-injection.py:36` | `"""NoSQL (Mongo-style) injection...` | **Not a remnant** — this is a real detection rule for NoSQL injection against target services (which may use Mongo even though Tulip doesn't). Keep. |
-| `docs/STATUS.md`, `docs/DEMO.md`, `docs/RUNBOOK.md`, `docs/SCHEMA.md` | Historical mentions of the old Mongo design / a `/mongo/test` endpoint | Already superseded in STATUS.md itself (documents the `/mongo/test` → `/mcp/test` fix); `RUNBOOK.md:347-348` and `SCHEMA.md:91` still reference the dead `/mongo/test` curl example and a `mongo_port` field that no longer exists in `services.json` — fix during Item J doc pass. |
+| `pull-and-save.sh:38` | `"mongo:7.0"` trong danh sách image cần pull | Xóa — không có gì trong stack chạy Mongo |
+| `pull-and-save.sh:97` | `"pymongo>=4.7.0"` trong danh sách wheel | Xóa |
+| `offline-restore.sh:88` | `pymongo` trong dòng fallback cài pip | Xóa |
+| `offline-bundle/images/mongo_7.0.tar` | Image đã pull từ trước, đã cũ (gitignore, chỉ local) | Xóa cục bộ; sẽ không bị sinh lại nữa sau khi xóa 2 dòng trên |
+| `offline-bundle/wheels/pymongo-4.18.2-*.whl` | Wheel đã cũ (gitignore, chỉ local) | Xóa cục bộ |
+| `ioc-brain/ioc_api.py:9,13,48,50-52` | Comment *nói về* Mongo, giải thích rằng nó KHÔNG được dùng (MCP/Postgres đã thay thế) | Không cần đổi code, nhưng các comment này sẽ di chuyển nguyên vẹn cùng file vào `prep-only/ai-ioc/` — giữ như vậy là ổn, đã đúng sự thật |
+| `rules-library/ctfproxy/block-injection.py:36` | `"""NoSQL (Mongo-style) injection...` | **Không phải tàn tích** — đây là rule phát hiện thật cho NoSQL injection nhắm vào service mục tiêu (service đó có thể dùng Mongo dù Tulip không dùng). Giữ nguyên. |
+| `docs/STATUS.md`, `docs/DEMO.md`, `docs/RUNBOOK.md`, `docs/SCHEMA.md` | Nhắc tới thiết kế Mongo cũ / một endpoint `/mongo/test` trong lịch sử | STATUS.md tự nó đã cập nhật lại (có ghi lại việc sửa `/mongo/test` → `/mcp/test`); `RUNBOOK.md:347-348` và `SCHEMA.md:91` vẫn còn tham chiếu ví dụ curl `/mongo/test` đã chết và field `mongo_port` không còn tồn tại trong `services.json` — sửa trong lượt rà soát doc ở Item J. |
 
-## Other dead/stray items found (not Mongo, not AI — just noise)
+## Các mục chết/lạc loài khác tìm được (không phải Mongo, không phải AI — chỉ là nhiễu)
 
-| Location | Note |
+| Vị trí | Ghi chú |
 |---|---|
-| `offline-bundle/images/localhost_aquahome-northflank_test.tar` | Not referenced anywhere in `pull-and-save.sh`'s image list — appears to be an unrelated image saved into this directory by hand or by another project. Gitignored (local only). Delete. |
-| `offline-bundle/images/composer_2.tar` | Also not in `pull-and-save.sh`'s list; `mock-vulnbox` only uses `python:3.11-slim` (no PHP/composer anywhere in this repo). Stray. Delete. |
-| `offline-bundle/images/moby_buildkit_buildx-stable-1.tar` | Buildkit is needed to *build* images, not to run the contest stack; bundling it as a runtime image is unnecessary bloat (~harmless, but not something `offline-restore.sh` needs to load). Leave out of the next bundle rebuild. |
-| `.host-agent.log`, `.status-pusher.log`, `.claude/scheduled_tasks.lock` | Runtime/tooling artifacts, already gitignored (except `.claude/`, which isn't part of the app). No action needed. |
+| `offline-bundle/images/localhost_aquahome-northflank_test.tar` | Không được tham chiếu ở bất cứ đâu trong danh sách image của `pull-and-save.sh` — có vẻ là một image không liên quan được lưu tay vào thư mục này, hoặc từ project khác. Gitignore (chỉ local). Xóa. |
+| `offline-bundle/images/composer_2.tar` | Cũng không nằm trong danh sách của `pull-and-save.sh`; `mock-vulnbox` chỉ dùng `python:3.11-slim` (không có PHP/composer nào trong repo này). Lạc loài. Xóa. |
+| `offline-bundle/images/moby_buildkit_buildx-stable-1.tar` | Buildkit cần để *build* image, không phải để chạy stack thi — gói nó như image runtime là thừa thãi không cần thiết (gần như vô hại, nhưng `offline-restore.sh` không cần load nó). Bỏ ra khỏi lần build bundle kế tiếp. |
+| `.host-agent.log`, `.status-pusher.log`, `.claude/scheduled_tasks.lock` | Artifact runtime/tooling, đã gitignore (trừ `.claude/`, không thuộc về app). Không cần làm gì. |
 
 ---
 
-## Summary tally
+## Tổng kết
 
-- **legal-runtime** (move into `contest-runtime/`): `dashboard/` (minus the ioc-brain call), `detection/`, `watchdog/`, `hostagent/` + `host_agent.py`, `generators/`, `services.json`, `validate-config.sh`, `suricata/`, `rules-library/`, `vulnbox-deploy/`, `traffic/`, `config-backups/`, `health_check.py`, `health-check.sh`, `bringup.sh`/`deploy-all.sh`/`teardown.sh` (reworked for MODE).
-- **AI/prep-only**: `ioc-brain/`, `mcp-tulip/`, `anythingllm` (compose service), `llm-host/`, `vault/`, `docs/REMOTE_LLM.md`.
-- **dead/remove**: Mongo lines in `pull-and-save.sh`/`offline-restore.sh` + their stale local artifacts, 3 stray `offline-bundle/images/*.tar` files, root `__pycache__/`.
-- **ambiguous — needs a decision before Item C/D proceed**:
-  1. `ml-fingerprint/` — ML (DBSCAN) but not generative; recommend quarantining to `prep-only/ml-classifier/` per the SPEC's own zone, BTC-gated, but this removes a working (if not-yet-fully-accepted) detection signal from the default contest stack.
-  2. `mock-vulnbox/` — recommend `prep-only/training/` since it's rehearsal-only, not real defense.
-  3. `dashboard/app/routes/analyze.py` (+ matching UI) — needs a concrete "absent/disabled in contest mode" design, not just left pointing at a dead URL.
+- **legal-runtime** (chuyển vào `contest-runtime/`): `dashboard/` (trừ lệnh gọi ioc-brain), `detection/`, `watchdog/`, `hostagent/` + `host_agent.py`, `generators/`, `services.json`, `validate-config.sh`, `suricata/`, `rules-library/`, `vulnbox-deploy/`, `traffic/`, `config-backups/`, `health_check.py`, `health-check.sh`, `bringup.sh`/`deploy-all.sh`/`teardown.sh` (viết lại cho khái niệm MODE).
+- **AI/prep-only**: `ioc-brain/`, `mcp-tulip/`, service compose `anythingllm`, `llm-host/`, `vault/`, `docs/REMOTE_LLM.md`.
+- **dead/remove**: các dòng Mongo trong `pull-and-save.sh`/`offline-restore.sh` + artifact cục bộ đã cũ của chúng, 3 file `offline-bundle/images/*.tar` lạc loài, `__pycache__/` ở root.
+- **ambiguous — cần quyết định trước khi Item C/D tiếp tục**:
+  1. `ml-fingerprint/` — là ML (DBSCAN) nhưng không generative; khuyến nghị cách ly vào `prep-only/ml-classifier/` theo đúng vùng mà SPEC tự quy định, cần BTC gật đầu, nhưng việc này làm mất một tín hiệu phát hiện đang hoạt động (dù chưa được nghiệm thu đầy đủ) khỏi stack contest mặc định.
+  2. `mock-vulnbox/` — khuyến nghị `prep-only/training/` vì chỉ dùng để diễn tập, không phải phòng thủ thật.
+  3. `dashboard/app/routes/analyze.py` (+ UI tương ứng) — cần một thiết kế cụ thể "vắng mặt/tắt ở contest mode", không chỉ để nó trỏ tới một URL đã chết.
 
-No item above is unclassified. Proceeding to Item B (mode switch) next, pending your call on the three ambiguous items.
+Không có mục nào ở trên còn chưa được phân loại. Tiếp theo sẽ làm Item B (chuyển đổi mode), chờ bạn quyết định về 3 mục ambiguous trên.
