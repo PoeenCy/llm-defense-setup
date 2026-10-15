@@ -1525,3 +1525,61 @@ competition VPN, not simulated. `test_rulegen.py` (16/16), Flag-trace's own suit
 `validate-config.sh` all still pass after these changes. Local machine and vulnbox resource
 levels checked clean after the full test pass (no leaked processes, `traffic/` at 4.6 MB,
 disk/memory both nominal on both ends).
+
+## 2026-10-16 — OS-watchdog alerts now delivered by poll (monitor pulls) instead of push (vulnbox can't)
+
+Follow-up to the one-way VPN finding above: the user asked specifically for OS-watchdog alerts
+to keep working by having the monitor call out to check periodically, since the push direction
+is confirmed broken on this practice arena's network and the organizer-side fix (if any) isn't in
+our control. Honeytoken's push path has the same limitation but was left alone this round --
+only OS-watchdog was in scope here.
+
+**Vulnbox side** (`contest-runtime/watchdog/os-watchdog-agent.sh`): `send_alert()` now also
+appends every alert as one JSON line (`id`, `ts`, `alert_type`, `message`, `detail`, `vulnbox`)
+to a local, size-capped log (`$SNAPSHOT_DIR/alerts.jsonl`, capped at 2000 lines, same
+copytruncate-style trim already used for Suricata's logs) -- the existing curl push is left in
+place too, in case a different network ever allows it. New `alerts-since <id>` subcommand
+(reachable the same `sudo <agent.sh>` way as the existing `allow`/`unallow`/`allow-list`
+subcommands) returns every line with `id` greater than the given value. Implemented in plain
+bash parameter expansion, not `jq`/`awk`, after confirming live that `jq` isn't installed on
+this vulnbox -- a real contest vulnbox has no guarantee of having it either.
+
+**Monitor side**: new `contest-runtime/hostagent/oswatchdog_pull.py`, a daemon thread started
+from `hostagent/agent.py` alongside the existing `status_loop`/`retention_loop` (so no new
+standalone process to leak-check -- same host-agent process already being restarted per the
+existing operational pattern). Every 20s it SSHes in (same alias, same `sudo` path as the
+allowlist actions), asks for everything since the last id it's already recorded (tracked in
+`.oswatchdog-pull-state.json`), and writes each new one into Redis's `alerts` list in the exact
+shape `detection_service.py`'s `/watchdog/os-report` push handler already produces (`lpush` +
+`ltrim 9999` + `publish alerts_channel`), so the dashboard shows a pulled alert identically to a
+pushed one, live via the existing WebSocket path, with zero dashboard-side changes needed.
+
+**Verified live end-to-end** against the real `dfcd-vbox`: confirmed `alerts-since 0` and
+`alerts-since <n>` both return exactly the expected subset directly on the vulnbox; restarted
+`host_agent.py` (after an unrelated machine reboot wiped all containers mid-session -- confirmed
+via `uptime`, not something this change caused) and watched `.oswatchdog-pull-state.json`'s
+`last_id` climb in lockstep with the vulnbox's own latest id across several real 20s poll
+cycles (15 -> 18 -> 20 -> 22 -> 31, matching the agent's own ongoing checks) with zero errors in
+`.host-agent.log` and zero duplicate entries in Redis (`alerts` list entry count matched unique
+timestamp count exactly). Confirmed via the dashboard's own `/api/alerts` that pulled alerts
+render with the same `type`/`message`/`detail` shape a push would have produced.
+
+**Noted, not fixed, out of scope for this change**: `check_new_processes()`'s baseline diff is
+noisy -- short-lived kernel worker threads (`[kworker/...]`) churn constantly and trip a
+"new-process" alert almost every 10s cycle. This was already true before this fix; it just
+stayed invisible while the push silently failed. Now that delivery actually works, this noise
+will show up in the dashboard EVENTS tab at a real volume. Worth a follow-up to exclude
+bracketed kernel-thread names from that specific check if it turns out to drown out real
+signal during the contest.
+
+Also re-confirmed while testing this (unrelated regression check): the monitor cannot reach the
+vulnbox's public service port (`10.13.2.10:8003`) directly over this VPN either (`curl` times
+out from the monitor, while the exact same request succeeds when run from the vulnbox's own
+shell) -- consistent with an intentional admin-network/game-network separation in this practice
+arena's topology, not a bug. Nothing in this repo relies on the monitor reaching that port
+directly (rule testing goes through SSH into the vulnbox or against captured pcaps), so this has
+no impact, but it's worth knowing before assuming a direct `curl` to the service will ever work
+from this machine.
+
+`test_rulegen.py` (16/16) and the Flag-trace suite (112/112, after rebuilding
+`/tmp/ft-transport`, also wiped by the same reboot) both still pass; `validate-config.sh` passes.

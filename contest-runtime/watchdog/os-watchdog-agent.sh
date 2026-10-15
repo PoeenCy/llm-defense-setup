@@ -27,6 +27,18 @@ BASELINE="${SNAPSHOT_DIR}/baseline"
 # repeating every CHECK_INTERVAL -- any genuinely NEW/different alert still
 # fires normally. One line per entry: "type|pattern".
 ALLOWLIST="${SNAPSHOT_DIR}/allowlist.txt"
+# Alerts are pushed via curl below (REPORT_URL) when that direction works,
+# but confirmed live on a real practice-arena VPN: monitor->vulnbox routes
+# fine (SSH, this script's own deploy), the REVERSE direction (vulnbox
+# opening a connection to the monitor, which this push needs) does not --
+# not a firewall on either host, a fresh throwaway listener on a new port
+# was tested and still unreachable from here. So every alert is ALSO
+# appended to a local, size-capped log the monitor can PULL over the
+# direction that does work (same ssh+sudo path already used by
+# allow/unallow/allow-list), via the `alerts-since <id>` subcommand below.
+ALERT_LOG="${SNAPSHOT_DIR}/alerts.jsonl"
+ALERT_SEQ_FILE="${SNAPSHOT_DIR}/alert_seq"
+ALERT_LOG_MAX_LINES=2000
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log()  { echo -e "[$(date +%H:%M:%S)] ${CYAN}[OS-WD]${NC} $*"; }
@@ -103,6 +115,14 @@ send_alert() {
     if is_allowlisted "$type" "${message} ${detail}"; then
         log "[$type] suppressed (allowlisted, not reported to monitor): $message"
         return 0
+    fi
+
+    local seq
+    seq=$(( $(cat "$ALERT_SEQ_FILE" 2>/dev/null || echo 0) + 1 ))
+    echo "$seq" > "$ALERT_SEQ_FILE"
+    echo "{\"id\":${seq},\"ts\":$(date +%s),\"alert_type\":$(json_str "$type"),\"message\":$(json_str "$message"),\"detail\":$(json_str "$detail"),\"vulnbox\":$(json_str "$(hostname)")}" >> "$ALERT_LOG"
+    if (( $(wc -l < "$ALERT_LOG" 2>/dev/null || echo 0) > ALERT_LOG_MAX_LINES )); then
+        tail -n "$ALERT_LOG_MAX_LINES" "$ALERT_LOG" > "${ALERT_LOG}.tmp" && mv "${ALERT_LOG}.tmp" "$ALERT_LOG"
     fi
 
     local payload="{\"type\":\"os-watchdog\",\"alert_type\":$(json_str "$type"),\"message\":$(json_str "$message"),\"detail\":$(json_str "$detail"),\"vulnbox\":$(json_str "$(hostname)")}"
@@ -272,6 +292,21 @@ allow_remove() {
     log "Removed from allowlist: [$a_type] $a_pattern"
 }
 
+# ── Pull-based alert delivery (called remotely via SSH by host_agent,
+#    polling every ~20s) -- see the ALERT_LOG comment above for why this
+#    exists instead of relying on the curl push alone. No jq/awk dependency:
+#    plain bash parameter expansion, since a vulnbox is not guaranteed to
+#    have jq installed (confirmed: this one doesn't). `id` is always the
+#    first field written by send_alert, so this is a cheap, reliable parse. ──
+alerts_since() {
+    local since="${1:-0}" line id
+    [[ -f "$ALERT_LOG" ]] || return 0
+    while IFS= read -r line; do
+        id="${line#*\"id\":}"; id="${id%%,*}"
+        [[ "$id" =~ ^[0-9]+$ ]] && (( id > since )) && echo "$line"
+    done < "$ALERT_LOG"
+}
+
 # ── Main ──────────────────────────────────────────────────────
 case "${1:-run}" in
     snapshot)    create_snapshot ;;
@@ -279,6 +314,7 @@ case "${1:-run}" in
     allow)       allow_add "${2:-}" "${3:-}" ;;
     unallow)     allow_remove "${2:-}" "${3:-}" ;;
     allow-list)  cat "$ALLOWLIST" 2>/dev/null || true ;;
+    alerts-since) alerts_since "${2:-0}" ;;
     run)
         # Create snapshot if none exists
         [[ -f "$BASELINE/processes.txt" ]] || create_snapshot
@@ -300,7 +336,7 @@ case "${1:-run}" in
         done
         ;;
     *)
-        echo "Usage: $0 {run|snapshot|diff|allow <type> <pattern>|unallow <type> <pattern>|allow-list}"
+        echo "Usage: $0 {run|snapshot|diff|allow <type> <pattern>|unallow <type> <pattern>|allow-list|alerts-since <id>}"
         exit 1
         ;;
 esac

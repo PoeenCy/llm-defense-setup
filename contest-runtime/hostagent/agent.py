@@ -12,6 +12,7 @@ import health_check  # noqa: E402
 
 from .actions import ACTIONS  # noqa: E402
 from .common import redis_client  # noqa: E402
+from .oswatchdog_pull import POLL_SECONDS as OSWATCHDOG_POLL_SECONDS, oswatchdog_pull_loop  # noqa: E402
 from .retention import retention_loop  # noqa: E402
 
 # Requests run concurrently (a 5-minute traffic replay must not freeze the
@@ -83,7 +84,10 @@ def status_loop():
 
 
 def main():
-    print(f"[host-agent] started: status push every 15s + pcap retention every 60s + {len(ACTIONS)} whitelisted actions", flush=True)
+    print(f"[host-agent] started: status push every 15s + pcap retention every 60s + "
+          f"os-watchdog alert pull every {OSWATCHDOG_POLL_SECONDS}s + "
+          f"{len(ACTIONS)} whitelisted actions", flush=True)
     threading.Thread(target=status_loop, daemon=True).start()
     threading.Thread(target=retention_loop, daemon=True).start()
+    threading.Thread(target=oswatchdog_pull_loop, daemon=True).start()
     ops_loop()
