@@ -1583,3 +1583,42 @@ from this machine.
 
 `test_rulegen.py` (16/16) and the Flag-trace suite (112/112, after rebuilding
 `/tmp/ft-transport`, also wiped by the same reboot) both still pass; `validate-config.sh` passes.
+
+## 2026-10-16 — OS-watchdog's "new process" check was almost pure self-inflicted noise once pull delivery actually worked; filtered three broad categories, confirmed the filter still lets a real finding through
+
+Once the pull mechanism above actually started delivering alerts, `check_new_processes()`
+(baseline `ps aux` diffed against live, forever, every `CHECK_INTERVAL`) turned out to fire on
+almost every single cycle for reasons that have nothing to do with an attacker:
+
+1. Kernel worker threads (`ps` shows these as bare `[name]`, e.g. `[kworker/u4:2-...]`) churn
+   constantly under normal kernel scheduling and were never going to be anything else.
+2. The agent's own process (`os-watchdog-agent.sh run`) is compared against a baseline that
+   predates its own (re)start, so it was alerting on itself, forever, every cycle, since the
+   baseline is never regenerated.
+3. **The pull mechanism's own 20s SSH polling** generates a constant stream of ephemeral sshd
+   privsep helper processes (`sshd:`, `sshd-auth:`, `sshd-session:`, worded differently across
+   consecutive checks on the very same OpenSSH build -- confirmed live) plus their PAM
+   login-banner side effects (`run-parts .../update-motd.d`, `landscape-sysinfo`). This is a
+   direct, self-inflicted consequence of today's own fix: monitoring the vulnbox more often (to
+   work around the push being broken) makes this specific check noisier, not quieter.
+
+Filtered all three out of both sides of the diff in `os-watchdog-agent.sh` (verified offline
+against the exact noise strings captured live, then live again: 9 of the next 10 real 12s
+check-cycles came back with zero alerts). This is a deliberate trade: a real attacker's SSH
+session (using an already-valid key) now looks the same as our own polling to *this specific
+check* -- `check_authorized_keys()` remains the system's actual signal for SSH-based
+persistence (a new key appearing), which this change does not touch.
+
+**The filter is not a blanket silencer** -- confirmed live, unprompted, during the same
+10-cycle verification: tick 6 correctly let through a genuine, non-noise alert for a
+`docker exec team-03-db-1 mysql -uroot -p<redacted> ...` command run directly on the vulnbox
+*host* (not from inside any container -- `flagsync` sits on the same `bot-network` as `db` and
+would reach it directly over that network if this were its own normal behavior, so a host-level
+`docker exec` points at something/someone with host shell access instead). The password itself
+is the same `MYSQL_ROOT_PASSWORD` already in team-03's own `docker-compose.yml`, not a
+newly-exposed secret, but the host-level exec capability behind it is the real signal. Flagged
+to the user for attribution (organizer/course-staff access vs. something to investigate) rather
+than guessed at here -- not something this session concluded one way or the other.
+
+Committed only the noise-filter change this round (the attribution question above is still
+open). `test_rulegen.py`/Flag-trace suite/`validate-config.sh` all still pass.

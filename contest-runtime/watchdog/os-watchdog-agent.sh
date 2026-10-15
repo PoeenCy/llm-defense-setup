@@ -144,10 +144,43 @@ check_new_processes() {
     local baseline="$BASELINE/processes.txt"
     [[ -f "$baseline" ]] || return
 
-    # Compare by command columns (cols 11+)
+    # Compare by command columns (cols 11+), filtering confirmed-live
+    # sources of pure noise out of BOTH sides of the diff (safe against a
+    # baseline captured before this fix -- no regen needed):
+    #  - kernel worker/helper threads: ps shows these as bare "[name]" (no
+    #    real argv). A kworker pool thread gets a new PID and a different
+    #    "-events_*" suffix every few seconds under completely normal
+    #    kernel scheduling and is never something an attacker starts.
+    #  - this agent's own process (os-watchdog-agent.sh run): it always
+    #    differs from a static baseline that predates its own (re)start --
+    #    confirmed live it otherwise re-fires as "new" on literally every
+    #    single check cycle forever, since the baseline is never updated.
+    #  - EVERY sshd-family helper (`sshd:`, `sshd-auth:`, `sshd-session:`,
+    #    in any wording across OpenSSH versions -- confirmed live multiple
+    #    different exact strings for the same "a new ssh connection opened"
+    #    event) and the PAM login-banner side effects of one
+    #    (`run-parts .../update-motd.d`, `landscape-sysinfo`). This is a
+    #    deliberate, broader exclusion than just one literal string: this
+    #    agent itself is now polled over ssh every ~20s (os-watchdog_pull.py
+    #    on the monitor), 24/7 for the whole contest, so EVERY new-process
+    #    check cycle would otherwise see a fresh batch of these with new
+    #    PIDs -- confirmed live, several different exact wordings appeared
+    #    across consecutive checks, making a one-string-at-a-time filter a
+    #    losing game. This does mean a real attacker's SSH session (if they
+    #    already have a working key) looks the same as our own polling to
+    #    THIS check -- authorized_keys changes (the actual persistence
+    #    vector) are still caught by the separate check_authorized_keys().
     local new_procs
-    new_procs=$(diff <(awk '{$1=$2=$3=$4=$5=$6=$7=$8=$9=$10=""; print}' "$baseline" | sort) \
-                     <(echo "$current" | awk '{$1=$2=$3=$4=$5=$6=$7=$8=$9=$10=""; print}' | sort) \
+    new_procs=$(diff <(awk '{$1=$2=$3=$4=$5=$6=$7=$8=$9=$10=""; print}' "$baseline" \
+                        | grep -v '^[[:space:]]*\[.*\][[:space:]]*$' \
+                        | grep -v 'os-watchdog-agent\.sh run' \
+                        | grep -v '^[[:space:]]*sshd' \
+                        | grep -v 'update-motd\|landscape-sysinfo' | sort) \
+                     <(echo "$current" | awk '{$1=$2=$3=$4=$5=$6=$7=$8=$9=$10=""; print}' \
+                        | grep -v '^[[:space:]]*\[.*\][[:space:]]*$' \
+                        | grep -v 'os-watchdog-agent\.sh run' \
+                        | grep -v '^[[:space:]]*sshd' \
+                        | grep -v 'update-motd\|landscape-sysinfo' | sort) \
                 | grep '^>' | grep -v grep | head -5 || true)
 
     if [[ -n "$new_procs" ]]; then
