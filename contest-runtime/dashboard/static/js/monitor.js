@@ -178,8 +178,11 @@ function renderAlerts() {
 }
 
 /* Flow id for the alert cards (same resolver the Events tab uses). Lazy +
-   cached so the live feed doesn't hammer Tulip. */
+   cached so the live feed doesn't hammer Tulip. alertData itself is capped
+   at 200 (core.js), so this cache never needs to outlive more than that many
+   entries -- capped a bit above it as a buffer, not left to grow forever. */
 const monFlowCache = new Map();
+const MON_FLOW_CACHE_MAX = 500;
 const monKey = a => [a.ts, a.src_ip, a.dst_ip, a.message].join('|');
 
 function monFlowHtml(a, r) {
@@ -205,7 +208,7 @@ async function monResolveFlows(sorted) {
   try { res = await apiPost('/api/tulip/resolve', { events: todo.map(i => sorted[i]) }); } catch (e) { return; }
   if (!Array.isArray(res)) return;
   todo.forEach((i, k) => {
-    if (res[k] && res[k].flow_id) monFlowCache.set(monKey(sorted[i]), res[k]);
+    if (res[k] && res[k].flow_id) { monFlowCache.set(monKey(sorted[i]), res[k]); capMap(monFlowCache, MON_FLOW_CACHE_MAX); }
     const span = document.querySelector(`.mon-flow[data-flowkey="${i}"]`);
     if (span) span.innerHTML = monFlowHtml(sorted[i], res[k]);
   });

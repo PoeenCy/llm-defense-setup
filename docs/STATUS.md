@@ -1273,3 +1273,71 @@ full allow → list → unallow → list cycle through the real dashboard API en
 appeared after `allow`, was gone after `unallow`, matching the real file on the vulnbox the whole
 time (not a mock). All 16 `test_rulegen.py` tests and `validate-config.sh` still pass (neither
 touches this watchdog-side change, checked anyway since both run in under a few seconds).
+
+
+---
+
+## 2026-10-15 — repo-wide unbounded-growth audit (browser memory + disk)
+
+User reported their machine repeatedly freezes during normal use and has to be hard-rebooted
+(confirmed independently mid-session: `uptime` showed the host had rebooted on its own at least
+three separate times across this session, each time wiping every running container). Asked for a
+full audit of the codebase for anything that could exhaust memory/disk "đột ngột" (suddenly).
+
+**Browser-side (dashboard open for an entire 8h contest -- these compound over that span):**
+- `evFlowCache` (events.js) and `monFlowCache` (monitor.js): both `Map`s cache per-event Tulip-
+  flow lookups and were NEVER pruned -- one entry added per event for the whole session, forever.
+  `alertData`/`hintData` (core.js) were already correctly capped (200/100, found during this same
+  audit) -- these two caches were the gap. Added `capMap()` (core.js, shared) -- evicts the oldest
+  entry (Map preserves insertion order) once a cache exceeds a cap; `evFlowCache` capped at 2000
+  (matches EVENTS' own 500-row fetch window with headroom), `monFlowCache` at 500 (`alertData`
+  itself never holds more than 200, so the cache never needs to outlive more than that).
+- Sticky toasts (flag-out/honeytoken-out, added 2026-10-13): only ever left the DOM on click --
+  an un-acknowledged pile over a long session is both a DOM-node leak and, in practice, a wall of
+  stacked toasts burying the screen. Capped at 8 simultaneous; a 9th evicts the single oldest.
+
+**Disk-side -- found a REAL, currently-manifesting issue, not hypothetical:** Suricata's own
+`eve.json`/`stats.log`/`suricata.log` (`contest-runtime/detection/suricata/log/`) are written
+directly to a bind-mounted host path by the Suricata process itself, with NO rotation anywhere in
+this repo. Measured at the time of the audit: `eve.json` 162MB, `stats.log` 48MB, host disk at
+81%. The live `suricata.yaml` that would normally configure `rotate-interval` is container-owned
+(uid from podman's rootless remap, mode 600) and not readable/writable by this host user or by
+`sudo -n` -- not something this repo can edit directly, and it isn't git-tracked either (checked:
+`git ls-files` returns nothing for it), so it's a generated runtime artifact, not source.
+
+Fixed with an external rotation instead, tied into the existing `retention.py` sweep (runs every
+60s via host_agent already): `_rotate_suricata_logs()` truncates-in-place (logrotate's
+"copytruncate") any of the three logs once they pass 50MB. **Caught a real correctness hazard
+before shipping it**: truncating `eve.json` out from under its active reader
+(`SuricataIngester` in `detection_service.py`, a `tail -f`-style loop with a persistent file
+handle) would otherwise leave that reader stuck at a stale file offset forever -- `readline()`
+returns `""` (indistinguishable from "no new data yet") once the read position is past the
+truncated file's new (smaller) size, silently killing Suricata alert ingestion for the rest of
+the contest with no error anywhere. Fixed `SuricataIngester` first (detects
+`f.tell() > current file size` on an empty read and reseeks to 0) and deployed that fix BEFORE
+ever truncating anything live, in the correct order: rebuilt+recreated `ctf-detection` with the
+reader fix, confirmed `SuricataIngester: tailing ...` logged clean at startup, THEN let the next
+`retention.py` sweep run. `fast.log` and `stats.log`/`suricata.log` have no reader anywhere in
+this codebase, so they're always safe to truncate blindly.
+
+**Verified live**, in the correct dependency order (reader fix deployed before any truncation
+could happen): rebuilt+force-recreated `ctf-detection`, restarted `host_agent.py` (picks up the
+new `retention.py`), waited one real 60s sweep cycle, checked the Redis `audit` list and saw the
+entry `"retention: truncated oversized Suricata log(s): eve.json (158MB)"` appear exactly as
+designed, `docker logs ctf-detection` showed
+`SuricataIngester: tailing /suricata/eve.json...` logged cleanly post-restart. `stats.log`
+(48.7MB at the time) correctly was NOT truncated yet, being just under the 50MB threshold --
+confirms the size check itself, not just the unconditional path. All 16 `test_rulegen.py` tests
+and `validate-config.sh` still pass.
+
+**Checked and cleared, no issue found** (part of the same audit, listed so this doesn't need
+re-auditing later): Redis `alerts`/`audit` lists (already `ltrim`'d to 9999/1999), `ops_result:*`
+keys (already `ex=600`), `suricata_rule_added`/`ctfproxy_rule_added:*` hashes (cleaned on rule
+delete already), the dashboard's WebSocket `ConnectionManager` (already discards on disconnect),
+`PcapWatcher`/`SuricataIngester` Python-side state (tail-based, nothing accumulates in-process --
+only the on-disk file was the problem), container stdout/stderr logs (this host's podman routes
+them through `journald`, Type: journald confirmed via `docker inspect`, not the unbounded-by-
+default `json-file` driver -- already size-managed by systemd's own journal rotation, currently
+1.4GB total), `.host-agent.log`/`.status-pusher.log` (low-volume -- host_agent only prints on
+errors/startup, and `deploy-all.sh` truncates `.host-agent.log` fresh via `>` on every restart
+anyway, not append).

@@ -1,7 +1,11 @@
 /* events.js — EVENTS tab: unified, searchable event log. */
 
 let evRows = [];
-const evFlowCache = new Map();   // survives auto-refresh, so rows don't flicker back to "…"
+// Survives auto-refresh (so rows don't flicker back to "…") but otherwise
+// grows by one entry per event for the whole session -- over an 8h contest
+// that's real browser memory, not theoretical. Capped via capMap() (core.js).
+const evFlowCache = new Map();
+const EV_FLOW_CACHE_MAX = 2000;
 const evKey = e => [e.ts, e.src_ip, e.dst_ip, e.message].join('|');
 
 function evQuery() {
@@ -67,7 +71,7 @@ async function evResolveVisible() {
     if (rows !== evRows || !Array.isArray(res)) return;      // table was reloaded meanwhile
     idx.forEach((i, k) => {
       rows[i]._flow = res[k];
-      if (res[k] && res[k].flow_id) evFlowCache.set(evKey(rows[i]), res[k]);
+      if (res[k] && res[k].flow_id) { evFlowCache.set(evKey(rows[i]), res[k]); capMap(evFlowCache, EV_FLOW_CACHE_MAX); }
       const cell = $('evf-' + i);
       if (cell) cell.innerHTML = flowCell(rows[i]);
     });
@@ -80,7 +84,7 @@ async function flowForEvent(e) {
   if (e._flow) return e._flow;
   if (!e.src_ip && !e.dst_ip) return { flow_id: null, why: 'event has no IP/time to search by' };
   try { e._flow = (await apiPost('/api/tulip/resolve', { events: [e] }))[0]; } catch (err) { return { flow_id: null, why: String(err) }; }
-  if (e._flow && e._flow.flow_id) evFlowCache.set(evKey(e), e._flow);
+  if (e._flow && e._flow.flow_id) { evFlowCache.set(evKey(e), e._flow); capMap(evFlowCache, EV_FLOW_CACHE_MAX); }
   return e._flow;
 }
 

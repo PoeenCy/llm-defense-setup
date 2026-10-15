@@ -262,6 +262,18 @@ class SuricataIngester(threading.Thread):
             while True:
                 line = f.readline()
                 if not line:
+                    # Detect truncation (retention.py rotates oversized
+                    # Suricata logs by truncating them in place, since
+                    # eve.json has no built-in rotation of its own) -- if our
+                    # read position is now past the file's real size, the
+                    # file was truncated out from under us: readline() would
+                    # otherwise return "" forever (stuck at a stale offset),
+                    # silently killing Suricata alert ingestion. Reseek to 0.
+                    try:
+                        if f.tell() > self._eve_path.stat().st_size:
+                            f.seek(0)
+                    except OSError:
+                        pass
                     time.sleep(0.1)
                     continue
                 try:

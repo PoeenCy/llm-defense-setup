@@ -32,6 +32,17 @@ oldest TimescaleDB chunks from Tulip's `flow`/`flow_item` hypertables. Unlike
 the two steps above, this deletes real contest data (old captured flows) --
 it only runs at all if the operator has explicitly set a retention window,
 and even then only as the last tier, logged as a CRITICAL audit event.
+
+Also truncates Suricata's own operational logs (eve.json/stats.log/
+suricata.log under detection/suricata/log/) once they pass
+SURICATA_LOG_MAX_BYTES each -- Suricata writes these directly to a bind-
+mounted host path with no rotation of its own, and its generated
+suricata.yaml is container-owned (root, mode 600 on this host), not
+something this repo can edit to add rotate-interval. Always safe, every
+sweep, independent of disk pressure: these are operational logs, not the
+only copy of anything (alerts are already in Redis/Tulip via
+SuricataIngester) -- see detection_service.py's truncation-aware tailing,
+which this module's truncate-in-place depends on to not go silently blind.
 """
 import json
 import shutil
@@ -45,6 +56,8 @@ TRAFFIC = ROOT.parent / "traffic"  # traffic/ lives at the repo root, not under 
 MIN_AGE_S = 600
 SCANNED_KEY = "detection:scanned_pcaps"
 DOCKER_PRUNE_COOLDOWN_S = 300  # don't hammer the docker daemon every 60s if still low
+SURICATA_LOG_DIR = ROOT / "detection" / "suricata" / "log"
+SURICATA_LOG_MAX_BYTES = 50 * 1024 ** 2  # 50MB -- these grow unbounded otherwise (seen 150MB+ in one session)
 
 
 def policy() -> dict:
@@ -93,6 +106,34 @@ def _docker_prune(rdb, free_before: int, min_free: int) -> int:
     return free_after
 
 
+def _rotate_suricata_logs(rdb) -> None:
+    """Truncate-in-place (logrotate's "copytruncate") any oversized Suricata
+    log -- safe for a continuously-open, append-only writer: the file
+    descriptor stays valid, new writes just start from offset 0. Only
+    eve.json has an active reader in this codebase (SuricataIngester in
+    detection_service.py), which detects this exact truncation and reseeks;
+    don't truncate it without that reader-side fix also in place."""
+    if not SURICATA_LOG_DIR.is_dir():
+        return
+    rotated = []
+    for name in ("eve.json", "stats.log", "suricata.log"):
+        f = SURICATA_LOG_DIR / name
+        try:
+            size = f.stat().st_size
+        except OSError:
+            continue
+        if size > SURICATA_LOG_MAX_BYTES:
+            try:
+                with open(f, "r+") as fh:
+                    fh.truncate(0)
+                rotated.append(f"{name} ({size / 1024**2:.0f}MB)")
+            except OSError:
+                continue
+    if rotated:
+        audit(rdb, f"retention: truncated oversized Suricata log(s): {', '.join(rotated)} "
+                   f"-- operational logs only, alerts already in Redis/Tulip, nothing lost there", True, "retention")
+
+
 def _tulip_drop_chunks(rdb, hours: float) -> None:
     """LAST RESORT, opt-in only (retention.tulip_flow_retention_hours > 0):
     drop TimescaleDB chunks older than `hours` from Tulip's flow/flow_item
@@ -116,6 +157,7 @@ def _tulip_drop_chunks(rdb, hours: float) -> None:
 
 
 def sweep(rdb) -> dict:
+    _rotate_suricata_logs(rdb)
     p = policy()
     now = time.time()
     files = []

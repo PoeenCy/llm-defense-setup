@@ -16,6 +16,22 @@ let stats = { flagOut:0, honeytoken:0, suricata:0, sla:0, hints:0, iocs:0 };
 let currentFilter = 'all';
 let startTime = Date.now();
 
+// A dashboard tab is meant to stay open for an entire multi-hour contest.
+// Any Map that only ever grows (never evicts) over that span is a real
+// browser-memory leak, not a theoretical one -- this caps one at `max`
+// entries, dropping the OLDEST first (Map preserves insertion order, so the
+// first key in iteration order is always the oldest). Call after every
+// `.set()` on a cache that's meant to survive across refreshes/reconnects
+// but has no natural size bound of its own (e.g. a per-event flow-lookup
+// cache that otherwise grows by one entry per event for the whole session).
+function capMap(map, max) {
+  while (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
 // ── Clock & uptime ────────────────────────────────────────────
 function updateClock() {
   const now = new Date();
@@ -51,15 +67,26 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal({
 // sticky: stays on screen until clicked (instead of auto-dismissing after
 // ~3s) -- for data actually leaving a service (flag-out/honeytoken-out),
 // where a glance-and-it's-gone toast is too easy to miss.
+// Sticky toasts (flag-out/honeytoken-out -- see notifyNewAlert) only leave
+// the DOM when clicked. Over an 8h contest with many such events, an
+// un-clicked pile grows forever -- both a real memory/DOM-node leak and, in
+// practice, a wall of stacked toasts burying the screen. Capped at the N
+// MOST RECENT: a new one past the cap evicts the single oldest sticky toast,
+// never a regular (already self-removing) one.
+const MAX_STICKY_TOASTS = 8;
+
 function showToast(msg, type = 'info', sticky = false) {
   const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
   if (sticky) {
+    toast.dataset.sticky = '1';
     toast.style.cursor = 'pointer';
     toast.title = 'Click to dismiss';
     toast.textContent = msg;
     toast.onclick = () => toast.remove();
+    const existing = container.querySelectorAll('[data-sticky="1"]');
+    if (existing.length >= MAX_STICKY_TOASTS) existing[0].remove();
   } else {
     toast.textContent = msg;
     setTimeout(() => toast.remove(), 3200);
