@@ -1341,3 +1341,66 @@ default `json-file` driver -- already size-managed by systemd's own journal rota
 1.4GB total), `.host-agent.log`/`.status-pusher.log` (low-volume -- host_agent only prints on
 errors/startup, and `deploy-all.sh` truncates `.host-agent.log` fresh via `>` on every restart
 anyway, not append).
+
+## 2026-10-15 — Merged teammate's Flag-trace branch; two real bugs found and fixed in the new capture mechanism while live-verifying it
+
+Merged `feat/decode-dashboard-detection` (Flag-trace: flag-out request-chain tracing, decode
+engine, exports exploit as a runnable script) into a new `integration/flagtrace` branch (not
+`main` yet). Full per-file conflict analysis done first; real two-sided conflicts (8 files:
+`retention.py`, `services.py`, `detection_service.py`, dashboard `main.py`/`main.js`/
+`index.html`, `SCHEMA.md`, `README.md`/`CONFIG.md`) hand-merged after confirming no actual
+overlapping lines in each; `contest-runtime/config/services.json` deliberately left untouched
+(the teammate's copy carries their own local-test values -- wrong flag regex, wrong ports --
+confirmed via `flagtrace/app/config.py` that the whole feature defaults to fully off when its
+config keys are absent, so no edit is needed to keep it safely disabled for the real team-03
+environment). 112 Flag-trace unit tests + this repo's own 16 `test_rulegen.py` tests +
+`validate-config.sh` all pass post-merge; `ctf-detection`/`ctf-dashboard`/`flagtrace` images
+rebuilt clean; dashboard regression-checked live (ctf_proxy services list, OS-watchdog
+allowlist, applied-rule counts all still correct post-merge).
+
+Per explicit request, read and live-verified the teammate's new vulnbox traffic-capture
+mechanism (`capture_pull.py` + `capture-remote.sh`, replacing the old rsync-by-file-age puller)
+before merging it in. Confirmed its design is a real improvement: protocol-agnostic BPF filter
+unchanged, but now self-monitors disk on BOTH ends (vulnbox spool size + `retention.min_free_gb`
+on the monitor) and only ever pulls files the remote has marked fully closed (`done/` vs
+`open/` split), instead of guessing by file age -- fixes the exact "truncated dump file" problem
+already documented in `docs/RUNBOOK.md`.
+
+**Bug 1 -- found live on `dfcd-vbox`, not visible from reading the code alone**: tcpdump's
+`-z "$dir/closed.sh"` postrotate-exec (used to move a just-closed pcap from `open/` to `done/`)
+failed on every single rotation: `tcpdump: compress_savefile: execlp(...) failed: Permission
+denied`, even though `closed.sh` had correct permissions and ran fine invoked directly by hand.
+Root cause confirmed via `sudo -n aa-status`: this vulnbox runs the **stock Ubuntu/Debian
+AppArmor profile for `/usr/sbin/tcpdump`** (shown "enforce", the running tcpdump PID confined
+under it), which denies tcpdump's own `-z` exec as a known hardening measure. Effect: `done/`
+stayed empty forever during the whole run (5 files piled up in `open/` across 5 rotations, zero
+moved), so `capture_pull.py` never had anything to pull -- a silent, total pipeline failure with
+the only trace being one line deep in tcpdump's own log. A real contest vulnbox is very likely
+to ship the same stock profile, so this isn't vulnbox-specific. Fixed in `capture-remote.sh` by
+dropping the `-z` exec dependency entirely: filenames are zero-padded timestamps, so the already-
+running monitoring loop can itself `mv` every file except the lexicographically-newest one from
+`open/` to `done/` using only its own shell builtins -- no exec, so the AppArmor tcpdump profile
+never applies. Verified live: ran 4 rotation cycles after the fix, confirmed files now land in
+`done/` correctly (newest stays in `open/`, everything older moves) each cycle.
+
+**Bug 2 -- found live right after fixing bug 1**: `capture_pull.py`'s cleanup step
+(`ssh(alias, "rm -- " + .../done/<file>)`) ran without `sudo`, but `done/` is created by
+`runner.sh` while it's running as root (via `sudo -n bash runner.sh`), so the directory is
+root-owned (`drwxr-xr-x root root`) -- the unprivileged SSH user (`azureuser`) can read files
+inside it (world-readable) but cannot unlink them (no write permission on the directory itself).
+Effect: every file that got successfully pulled was left behind on the vulnbox forever --
+confirmed live (`rm` failing with exit 1, logged as "Capture pull degraded", repeating every
+15s pull cycle while the file accumulated on disk) -- exactly the class of unbounded-disk-growth
+problem flagged in the audit above, just on the vulnbox side instead of the monitor. Fixed by
+adding `sudo -n` to that `rm`. Verified live across the same 4-cycle test: `done/` stayed empty
+after each pull (confirmed via direct `ls` on the vulnbox after every cycle, not just the local
+puller's own success message), and the already-accumulated old-session leftover files were
+cleaned up by the fixed code on the very next drain. All test artifacts (remote session
+directories, locally-pulled test pcaps) removed afterward.
+
+**Still open before merging `integration/flagtrace` into `main`**: `MODE=prep` local regression
+pass (mock-vulnbox path), live re-verification of `ctf_proxy` multi-condition rule building and
+the OS-watchdog allowlist UI flow post-merge, and specifically the `retention.py` +
+`flagtrace`'s `ledger_lock` pcap-deletion-guard interplay (hand-merged, syntax-checked, but not
+yet exercised live with Flag-trace actually running against a pcap retention WOULD otherwise
+delete).

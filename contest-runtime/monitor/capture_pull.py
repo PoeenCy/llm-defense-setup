@@ -101,7 +101,10 @@ def pull_once(state, cfg):
                    "cat -- " + shlex.quote(state["remote_dir"] + "/done/" + name)]
             subprocess.run(cmd, stdout=f, check=True, timeout=120)
         publish_file(temp, dest, {"session": state["session"], "source": cfg.get("flagtrace", {}).get("capture_source", "vulnbox")})
-        ssh(state["alias"], "rm -- " + shlex.quote(state["remote_dir"] + "/done/" + name))
+        # done/ is created by runner.sh under sudo, so it's root-owned; a
+        # plain rm from this unprivileged ssh user can't unlink inside it
+        # (confirmed live: every pull left the remote file behind forever).
+        ssh(state["alias"], "sudo -n rm -- " + shlex.quote(state["remote_dir"] + "/done/" + name))
 
 
 def start(cfg):
