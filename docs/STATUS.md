@@ -1398,9 +1398,33 @@ puller's own success message), and the already-accumulated old-session leftover 
 cleaned up by the fixed code on the very next drain. All test artifacts (remote session
 directories, locally-pulled test pcaps) removed afterward.
 
+**Post-fix regression pass, all live against `dfcd-vbox`/the real stack, all clean**:
+- `ctf_proxy` multi-condition AND rule: built a 3-condition rule (path + body + param) via
+  `/api/rules/ctfproxy/build`, applied via `/api/rules/ctfproxy`, confirmed it showed up both in
+  the RULES-tab parsed-methods table (with a correct added-timestamp) and in
+  `/api/applied?proxy=1` (`loaded: true`, real AST-parsed method name) -- the exact feature from
+  the pre-merge session, re-verified unaffected by the merge. Deleted cleanly afterward,
+  confirmed `/api/applied?proxy=1` methods list back to empty.
+- OS-watchdog allowlist: full add -> list -> remove -> list cycle via the real API, confirmed
+  entries appear/disappear correctly.
+- `retention.py`'s `ledger_lock`/`may_delete` guard: confirmed by reading the merged code that
+  `guarded` evaluates `(cfg().get("flagtrace") or {}).get("enabled") or db_dir.exists()` -- since
+  `services.json` was deliberately left without a `flagtrace` section and no
+  `data/flagtrace/flagtrace.sqlite3` exists in this environment, `guarded` is `False` and
+  `nullcontext()` is used, so pcap deletion runs exactly as it did before the merge, with zero
+  behavior change, for as long as Flag-trace stays off (the real-contest default). Confirmed the
+  `flagtrace.app.ledger` import itself resolves cleanly (`python3 -c "import
+  hostagent.retention"` succeeds) so this path is at least load-bearing-safe if Flag-trace is
+  ever turned on later.
+- `host_agent.py` confirmed running the current (post-merge, post-fix) `retention.py` (restarted
+  22:41, after the 22:30 merge).
+
+**Noted but out of scope, pre-existing, not touched**: `hostagent/actions/ctfproxy.py`'s apply/
+delete audit-log line counts rule methods via `source.count("def ") - 1`, which also counts
+`def` appearing inside the filter template's commented-out example methods -- a cosmetic
+miscount in the human-readable log/toast text only; the actual active-method list used
+everywhere else (APPLIED tab, delete-by-name) is AST-parsed correctly and unaffected.
+
 **Still open before merging `integration/flagtrace` into `main`**: `MODE=prep` local regression
-pass (mock-vulnbox path), live re-verification of `ctf_proxy` multi-condition rule building and
-the OS-watchdog allowlist UI flow post-merge, and specifically the `retention.py` +
-`flagtrace`'s `ledger_lock` pcap-deletion-guard interplay (hand-merged, syntax-checked, but not
-yet exercised live with Flag-trace actually running against a pcap retention WOULD otherwise
-delete).
+pass (mock-vulnbox path) -- not run this session, lower priority since it doesn't touch the
+real vulnbox/capture path that was this session's focus.
