@@ -40,6 +40,8 @@ Dashboard hỏng hẳn? Xem mục cuối ("Không mở được Dashboard").
 | BTC đổi IP / port vulnbox | Tab CONFIG → Quick edit *Vulnbox IP* / *Service public port* → **Validate** → **Save & apply** |
 | Đổi flag regex / URL nộp flag | Tab CONFIG → *Flag regex* / *Flag submit URL*. Token nộp flag **không** nằm trong config (xem `team-tokens.txt`) |
 | Bật / tắt chặn thật (ctf_proxy) | Tab CONFIG → *ctf_proxy mode*: `disabled` (chỉ giám sát) hoặc `docker-compose` + 4 trường *Target ...*, rồi chạy `MODE=contest bash deploy-all.sh` |
+| Xem một flag-out bị lấy bằng chuỗi request nào | Tab **FLAG TRACE** (cần `flagtrace.enabled` + `flagtrace.trace.enabled`). Chọn profile → bấm một *Value link* để xem giá trị đi từ đâu tới đâu. Có traffic đến muộn → **Re-analyse**. Chi tiết: `contest-runtime/flagtrace/README.md` |
+| Bị bắn quá nhiều, Flag-trace ingest chậm/tụt lại | Tab **FLAG TRACE** → ô *Ingest decoder*: hạ `full` → `gated` (vẫn bắt flag mã hóa phổ biến, nhanh hơn nhiều khi body nhỏ), chỉ chọn `off` khi thật cần (mất flag chỉ lộ sau decode). Giữ qua restart; System Status báo vàng tới khi bấm *Back to config default* |
 | Lỡ sửa config hỏng | Tab CONFIG → **Rollback** (mỗi lần lưu đều có backup trong `contest-runtime/config-backups/`) |
 | Muốn đọc log thuần text | EVENTS → **Open as .log**, hoặc `curl -s localhost:8080/api/events.log \| less` |
 | Đồng đội muốn xem Dashboard từ máy khác | Tab CONFIG → *Dashboard bind IP* = IP LAN của máy này. **Chỉ làm trong mạng tin cậy** — các cổng này không có mật khẩu |

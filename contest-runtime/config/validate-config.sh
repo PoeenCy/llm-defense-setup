@@ -55,6 +55,13 @@ def get(d, *keys):
 with open(CONFIG) as f:
     d = json.load(f)
 
+sys.path.insert(0, os.path.join(REPO_ROOT, "contest-runtime"))
+try:
+    from flagtrace.app.config import validate_optional
+    validate_optional(d)
+except (ValueError, KeyError, TypeError) as exc:
+    fail(f"Flag-trace config: {exc}")
+
 print(f"\n=== Validating: {CONFIG} ===\n")
 
 # ---- team_id, teams_cidr ----

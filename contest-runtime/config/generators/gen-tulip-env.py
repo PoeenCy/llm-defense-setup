@@ -40,6 +40,10 @@ bpf = " or ".join(f"port {p}" for p in service_ports) if service_ports else ""
 
 # Generate tick start as now (will be overridden at match start)
 tick_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+game = cfg.get("game") or {}
+if game.get("start_time"):
+    tick_start = datetime.fromisoformat(game["start_time"].replace("Z", "+00:00")).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+tick_length = int(game.get("tick_seconds", 120) * 1000)
 
 # Directory-watch mode (empty PCAP_OVER_IP) is the default: Tulip picks up
 # pcaps dropped into traffic/ instead of needing a live PCAP-over-IP broker
@@ -73,7 +77,7 @@ BPF="{bpf}"
 ##############################
 
 TICK_START="{tick_start}"
-TICK_LENGTH=120000
+TICK_LENGTH={tick_length}
 
 FLAG_REGEX="{flag_regex}"
 
@@ -92,6 +96,25 @@ PCAP_OVER_IP="{pcap_over_ip}"
 DUMP_PCAPS=""
 DUMP_PCAPS_INTERVAL="1m"
 DUMP_PCAPS_FILENAME="2006-01-02_15-04-05.pcap"
+
+##############################
+# CONVERTER (DECODER) CONFIGS
+##############################
+# decode_all tries a wide matrix of decodings (base64/32/58/85, hex, url,
+# html, escapes, quoted-printable, gzip/zlib/deflate/bz2/lzma, rot13, reverse,
+# single-byte xor), stacked a few layers deep, on every flow. It only adds a
+# representation when a decoding reveals a flag the raw traffic did not already
+# show, so it is gated on FLAG_REGEX above and a wrong flag regex silently
+# disables it. The decoded text is indexed too, which is what makes an encoded
+# flag findable by its plaintext -- both in Tulip's own search and in the
+# dashboard's event -> flow resolution (/api/tulip/resolve).
+# Empty CONVERTERS turns the pass off; DECODE_ALL_EMIT=all shows every
+# successful decoding instead of only the flag-bearing ones (noisy, for
+# hunting an unknown encoding by hand); lower DECODE_ALL_BUDGET if the
+# assembler cannot keep up with the traffic.
+CONVERTERS="decode_all"
+DECODE_ALL_EMIT="flags"
+DECODE_ALL_BUDGET="0.4"
 
 ##############################
 # FLAGID CONFIGS

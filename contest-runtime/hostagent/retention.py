@@ -37,9 +37,11 @@ import json
 import shutil
 import subprocess
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from .common import ROOT, audit, cfg, redis_client
+from flagtrace.app.ledger import ledger_lock, may_delete
 
 TRAFFIC = ROOT.parent / "traffic"  # traffic/ lives at the repo root, not under contest-runtime/
 MIN_AGE_S = 600
@@ -146,8 +148,14 @@ def sweep(rdb) -> dict:
             why = "older than keep time"
         if not why:
             continue
+        db_dir = ROOT.parent / "data" / "flagtrace"
+        guarded = (cfg().get("flagtrace") or {}).get("enabled") or (db_dir / "flagtrace.sqlite3").exists()
         try:
-            f.unlink()
+            with ledger_lock(db_dir, blocking=False) if guarded else nullcontext():
+                if guarded and not may_delete(db_dir / "flagtrace.sqlite3", f.name):
+                    continue
+                f.unlink()
+                f.with_suffix(f.suffix + ".ready").unlink(missing_ok=True)
         except OSError:
             continue
         deleted.append(f.name)

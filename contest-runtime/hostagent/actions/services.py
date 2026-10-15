@@ -31,7 +31,7 @@ def _capture_state() -> tuple[str, str]:
     local = "running" if _pull_loop_pid() else "stopped"
     if not alias:
         return "unknown", "vulnbox.capture_ssh_alias not set"
-    code, out = ssh(alias, "pgrep -f 'tcpdump -Z root' >/dev/null && echo RUNNING || echo STOPPED", timeout=15)
+    code, out = run(["python3", str(ROOT / "monitor" / "capture_pull.py"), "--status"], timeout=20)
     if code != 0:
         return ("degraded" if local == "running" else "stopped"), f"vulnbox unreachable; local pull loop {local}"
     remote = "running" if "RUNNING" in out else "stopped"
@@ -91,18 +91,9 @@ def list_services(payload, rdb):
 def _capture(op: str) -> tuple[bool, str]:
     alias = cfg().get("vulnbox", {}).get("capture_ssh_alias")
     if op in ("stop", "restart"):
-        pid = _pull_loop_pid()
-        if pid:
-            # Kill only the loop and its own children. NOT killpg: the loop was
-            # spawned from this agent and can share its process group.
-            run(["pkill", "-TERM", "-P", str(pid)], timeout=10)
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
-        PULL_PIDFILE.unlink(missing_ok=True)
-        if alias:
-            ssh(alias, "sudo -n pkill -f 'tcpdump -Z root' || true", timeout=20)
+        code, out = run(["python3", str(ROOT / "monitor" / "capture_pull.py"), "--stop"], timeout=90)
+        if code != 0:
+            return False, out[-1500:]
         if op == "stop":
             return True, "Capture stopped (remote tcpdump + local pull loop). Already-captured pcaps are kept."
     code, out = run(["bash", str(ROOT / "monitor" / "deploy-capture-pull.sh"), "--background"], timeout=90)

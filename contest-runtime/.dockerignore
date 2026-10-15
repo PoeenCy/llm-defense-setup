@@ -1,0 +1,10 @@
+**/__pycache__
+**/*.pyc
+**/*.log
+config/services.json
+config-backups
+detection/suricata
+**/.capture-*
+**/backups
+**/tests
+*.log

@@ -118,6 +118,8 @@ TULIP_WEB_PORT=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d[
 BIND_IP=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(d['monitor_host'].get('bind_ip','127.0.0.1'))")
 MOCK_VULNBOX_ENABLED=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(str(d.get('mock_vulnbox',{}).get('enabled',False)).lower())")
 ML_CLASSIFIER_ENABLED=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(str(d.get('ml_classifier',{}).get('enabled',False)).lower())")
+FLAGTRACE_ENABLED=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(str(d.get('flagtrace',{}).get('enabled',False)).lower())")
+FLAGTRACE_TRACE_ENABLED=$(python3 -c "import json; d=json.load(open('$CONFIG')); print(str((d.get('flagtrace',{}).get('trace') or {}).get('enabled',False)).lower())")
 
 if [[ "$MODE" == "contest" ]]; then
     header "Step 0b: Pre-clean — stop any leftover prep-only containers"
@@ -228,7 +230,9 @@ header "Step 6: Start monitor hub services (MODE=$MODE)"
 
 cd "$SCRIPT_DIR"
 log "Building hub images..."
-docker compose "${COMPOSE_FILES[@]}" build --quiet 2>&1 | tail -3 || warn "Build had warnings"
+if [[ "$OFFLINE" != true ]]; then
+    docker compose "${COMPOSE_FILES[@]}" build --quiet 2>&1 | tail -3 || warn "Build had warnings"
+fi
 
 log "Starting core services (redis, detection, watchdog)..."
 docker compose "${COMPOSE_FILES[@]}" up -d redis
@@ -251,6 +255,42 @@ ok "Compose environment saved to .env (manual 'docker compose up -d <svc>' now g
 
 docker compose "${COMPOSE_FILES[@]}" up -d detection watchdog
 ok "Legal defense/monitor services started"
+
+if [[ "$FLAGTRACE_ENABLED" == true ]]; then
+    mkdir -p "$SCRIPT_DIR/data/flagtrace"
+    if [[ "$OFFLINE" == true ]]; then
+        FT_UP=(up -d --no-build --pull never)
+    else
+        FT_UP=(up -d)
+        docker compose "${COMPOSE_FILES[@]}" build flagtrace
+    fi
+    # The new image decides whether its schema is newer than the file on disk.
+    # Upgrades run with ingest and worker both stopped, after a consistent
+    # backup: the previous image cannot read an upgraded database.
+    FT_SCHEMA=0
+    docker compose "${COMPOSE_FILES[@]}" run --rm --no-deps flagtrace \
+        python -m flagtrace.app.main migrate --check >/dev/null 2>&1 || FT_SCHEMA=$?
+    if [[ "$FT_SCHEMA" -eq 3 ]]; then
+        log "Flag-trace schema upgrade pending: stopping ingest + worker, backing up, migrating"
+        docker compose "${COMPOSE_FILES[@]}" stop flagtrace flagtrace-worker >/dev/null 2>&1 || true
+        docker compose "${COMPOSE_FILES[@]}" run --rm --no-deps flagtrace python -m flagtrace.app.main migrate \
+            || die "Flag-trace migration failed; the pre-upgrade backup is in data/flagtrace/backups/"
+        ok "Flag-trace database migrated (backup in data/flagtrace/backups/)"
+    elif [[ "$FT_SCHEMA" -ne 0 ]]; then
+        die "Flag-trace schema check failed (database newer than this image, or unreadable); not starting it"
+    fi
+    docker compose "${COMPOSE_FILES[@]}" "${FT_UP[@]}" flagtrace
+    if [[ "$FLAGTRACE_TRACE_ENABLED" == true ]]; then
+        docker compose "${COMPOSE_FILES[@]}" "${FT_UP[@]}" flagtrace-worker
+        ok "Flag-trace ingest + trace worker started"
+    else
+        # Ingest keeps running; stored profiles, jobs and results are kept.
+        docker compose "${COMPOSE_FILES[@]}" stop flagtrace-worker >/dev/null 2>&1 || true
+        ok "Flag-trace ingest started (flagtrace.trace.enabled=false: trace worker stopped)"
+    fi
+else
+    docker compose "${COMPOSE_FILES[@]}" stop flagtrace flagtrace-worker >/dev/null 2>&1 || true
+fi
 
 if [[ "$MODE" == "prep" ]]; then
     log "MODE=prep: starting practice fixtures..."

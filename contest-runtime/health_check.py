@@ -74,9 +74,9 @@ def check_vulnbox_ssh(cfg):
 def check_pull_loop():
     # the bracket trick ([r]sync, not rsync) stops pgrep -f from matching its
     # own argv -- a bare pattern here would always "succeed" against itself
-    code, out, _ = _run("pgrep -f '[r]sync.*ctf-capture' | head -1")
+    code, out, _ = _run("pgrep -f '[c]apture_pull.py' | head -1")
     if code == 0 and out:
-        return {"name": "Capture pull loop", "status": "up", "detail": "rsync loop running"}
+        return {"name": "Capture pull loop", "status": "up", "detail": "closed-file shipper running"}
     return {"name": "Capture pull loop", "status": "down", "detail": "not running — bash contest-runtime/monitor/deploy-capture-pull.sh"}
 
 
@@ -175,6 +175,69 @@ def check_ml():
             "detail": f"{s}: {st.get('note', 'waiting for traffic')} (ports {st.get('service_ports')})"}
 
 
+def check_flagtrace():
+    config = _cfg()
+    if not config.get("flagtrace", {}).get("enabled"):
+        return {"name": "Flag-trace ingest", "status": "up", "detail": "disabled in config"}
+    try:
+        from flagtrace.app.api import query
+        db = ROOT.parent / "data" / "flagtrace" / "flagtrace.sqlite3"
+        code, data = query(db, config["game"]["id"], "/health")
+        state = "up" if code == 200 else "down"
+        detail = (f"{data.get('transactions', 0)} transactions; {data.get('pending_trace_jobs', 0)} flag-outs waiting dispatch; "
+                  f"{data.get('trace_profiles', 0)} profiles; {data.get('state', 'unknown')}")
+        if data.get("error"):
+            detail += ": " + data["error"]
+        return {"name": "Flag-trace ingest", "status": state, "detail": detail}
+    except Exception as exc:
+        return {"name": "Flag-trace ingest", "status": "down", "detail": str(exc)}
+
+
+def check_flagtrace_worker():
+    config = _cfg()
+    block = config.get("flagtrace", {})
+    if not block.get("enabled") or not (block.get("trace") or {}).get("enabled"):
+        return {"name": "Flag-trace worker", "status": "up", "detail": "disabled in config"}
+    try:
+        from flagtrace.app.api import query
+        db = ROOT.parent / "data" / "flagtrace" / "flagtrace.sqlite3"
+        _, data = query(db, config["game"]["id"], "/trace-status", True)
+        jobs = data["backlog"]["jobs"]
+        detail = (f"{data['state']}; waiting dispatch {data['backlog']['pending_dispatch']}, "
+                  f"pending {jobs['pending']}, running {jobs['running']}, failed {jobs['failed']}")
+        errors = [w.get("error") or w.get("last_error") for w in data["workers"] if not w["stale"]]
+        if any(errors):
+            detail += ": " + next(e for e in errors if e)
+        return {"name": "Flag-trace worker", "status": "up" if data["state"] == "running" else "down", "detail": detail}
+    except Exception as exc:
+        return {"name": "Flag-trace worker", "status": "down", "detail": str(exc)}
+
+
+def check_flagtrace_decoder():
+    """A lowered decoder mode is kept across restarts on purpose, so it has to
+    stay visible here until someone raises it again."""
+    config = _cfg()
+    if not config.get("flagtrace", {}).get("enabled"):
+        return {"name": "Flag-trace decoder", "status": "up", "detail": "disabled in config"}
+    try:
+        from flagtrace.app.api import query
+        from flagtrace.app.config import Config
+        db = ROOT.parent / "data" / "flagtrace" / "flagtrace.sqlite3"
+        _, d = query(db, config["game"]["id"], "/decoder", cfg=Config(config))
+        mode, default = d.get("mode"), d.get("default")
+        since = time.strftime("%H:%M", time.localtime(d["since"])) if d.get("since") else None
+        origin = f"set from the {d.get('source')} at {since}" if since else "from config"
+        cache = f"; cache {d.get('cache_hits', 0)} hit(s), {d.get('searched', 0)} search(es)" if "searched" in d else ""
+        if mode == "full":
+            return {"name": "Flag-trace decoder", "status": "up", "detail": f"full ({origin}){cache}"}
+        effect = ("flags hidden by an encoding are not looked for" if mode == "off"
+                  else "only bodies that look encoded are decoded")
+        return {"name": "Flag-trace decoder", "status": "slow",
+                "detail": f"{mode.upper()} ({origin}; config default {default}) — {effect}{cache}"}
+    except Exception as exc:
+        return {"name": "Flag-trace decoder", "status": "down", "detail": str(exc)}
+
+
 def run_all():
     cfg = _cfg()
     rows = [check_disk()]
@@ -186,6 +249,9 @@ def run_all():
     rows.append(check_ctfproxy(cfg))
     rows.append(check_ml())
     rows.append(check_retention())
+    rows.append(check_flagtrace())
+    rows.append(check_flagtrace_worker())
+    rows.append(check_flagtrace_decoder())
     return {"checked_at": time.time(), "items": rows}
 
 

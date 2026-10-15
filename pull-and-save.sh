@@ -56,6 +56,11 @@ cd "$TULIP_DIR"
 docker compose build 2>&1 | tail -5 || warn "Tulip build had issues"
 cd "$SCRIPT_DIR"
 
+# Build this repository's own runtime images before archiving. A fixed name
+# makes the Flag-trace image available even on a clean air-gapped machine.
+docker compose -f docker-compose.contest.yml --profile flagtrace build detection dashboard watchdog flagtrace  # flagtrace-worker shares this image
+docker save ctf-flagtrace:phase2 -o "$BUNDLE/images/ctf-flagtrace_phase2.tar"
+
 # Save all images
 log "Saving all Docker images to offline-bundle/images/..."
 ALL_IMAGES=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep -v '<none>' | grep -v "sagemath" | grep -v "bagisto" | sort -u)

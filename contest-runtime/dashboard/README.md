@@ -17,6 +17,7 @@ One feature = one backend file + one frontend file. To debug a tab, open only th
 | Hunt (query events + Tulip flows to reconstruct an attack) | `app/routes/hunt.py` | `static/js/hunt.js` | — |
 | Applied (which rules are live + hit counts) | `app/routes/applied.py` | `static/js/applied.js` | `hostagent/actions/ctfproxy.py` (get) |
 | Rule library (prepared alert rules) | `app/routes/rules.py` (`/api/rules/library`) | `static/js/rules.js` | — |
+| Flag trace (flag-out profiles, timeline, evidence, re-analyse) | `app/routes/flagtrace.py` (allowlisted proxy to the Flag-trace API) | `static/js/flagtrace.js` | `contest-runtime/flagtrace/` |
 
 Shared: `app/core/` (settings, Redis client, `run_op()` = ask the host agent), `static/js/core.js`
 (state, modal, toast, `escHtml`), `static/js/api.js` (fetch helpers), `static/js/main.js` (tab routing, startup).

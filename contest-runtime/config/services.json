@@ -1,5 +1,5 @@
 {
-  "_comment": "SINGLE SOURCE OF TRUTH — edit only this file. All components read from it.",
+  "_comment": "SINGLE SOURCE OF TRUTH \u2014 edit only this file. All components read from it.",
   "team_id": "team-03",
   "vulnbox": {
     "ip": "10.13.2.10",
@@ -19,9 +19,9 @@
     "bind_ip_note": "Address the control-plane ports (dashboard, redis, tulip, postgres) listen on. 127.0.0.1 = only this machine (safe default: the monitor host sits on the competition VPN, and these ports have no auth). Set to a LAN IP only to let teammates on a trusted network open the dashboard. The honeytoken port always listens on all interfaces by design."
   },
   "flag": {
-    "regex": "[A-Z0-9]{31}=",
+    "regex": "DTFC\\{[^}]*\\}",
     "submit_url": "http://10.13.1.10:8080/flags",
-    "note": "PUT with header X-Team-Token: <team token, kept OUT of this file — see team-tokens.txt locally>"
+    "note": "PUT with header X-Team-Token: <team token, kept OUT of this file \u2014 see team-tokens.txt locally>"
   },
   "teams_cidr": "10.13.2.0/24",
   "gameserver_hint": {
@@ -56,7 +56,7 @@
       "duration": 60,
       "interval": 2
     },
-    "note": "keyword MUST stay the single source other tools read from — do not hardcode elsewhere",
+    "note": "keyword MUST stay the single source other tools read from \u2014 do not hardcode elsewhere",
     "insertion": {
       "mode": "docker-compose",
       "remote_compose_file": "~/practice-setup/team-03/docker-compose.yml",
@@ -67,7 +67,7 @@
   },
   "ml_classifier": {
     "enabled": false,
-    "note": "Do NOT enable during contest unless BTC has confirmed in writing; encoder/clustering classifier only, never generative. This flag has NO EFFECT when MODE=contest regardless of its value — bringup.sh never passes docker-compose.prep.yml (where ml-fingerprint lives) in contest mode, full stop. Only meaningful when MODE=prep."
+    "note": "Do NOT enable during contest unless BTC has confirmed in writing; encoder/clustering classifier only, never generative. This flag has NO EFFECT when MODE=contest regardless of its value \u2014 bringup.sh never passes docker-compose.prep.yml (where ml-fingerprint lives) in contest mode, full stop. Only meaningful when MODE=prep."
   },
   "services": [
     {
@@ -76,9 +76,26 @@
       "proto": "tcp",
       "layer": "l7-http",
       "description": "team-03 public-proxy -> DFCD app stack (php/ws/mathsays)",
-      "note": "team-03 public-proxy -> DFCD app stack (php/ws/mathsays). Capture is now on the external interface (pre-NAT), so port 8003 (the public port) is what both tcpdump and Tulip see directly -- no capture_port override needed."
+      "note": "team-03 public-proxy -> DFCD app stack (php/ws/mathsays). Capture is now on the external interface (pre-NAT), so port 8003 (the public port) is what both tcpdump and Tulip see directly -- no capture_port override needed.",
+      "capture_port": 8090,
+      "capture_ips": ["127.0.0.1"]
     }
   ],
+  "game": {
+    "id": "dtfc-local-2026-10-14",
+    "start_time": "2026-10-13T15:00:00Z",
+    "tick_seconds": 120,
+    "checker_ips": []
+  },
+  "teams": [],
+  "flagtrace": {
+    "enabled": true,
+    "capture_source": "lo-8090",
+    "note": "Enabled against loopback-captured pcaps (local dtfc target on 127.0.0.1:8090), modelled on the data/flagtrace/report-2026-10-14 run. trace.enabled starts the Phase 2 trace worker.",
+    "trace": {
+      "enabled": true
+    }
+  },
   "retention": {
     "pcap_keep_minutes": 0,
     "pcap_max_gb": 5,

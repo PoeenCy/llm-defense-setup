@@ -36,8 +36,8 @@ services:
   # ============================================================
   detection:
     build:
-      context: ./contest-runtime/detection/service
-      dockerfile: Dockerfile
+      context: ./contest-runtime
+      dockerfile: detection/service/Dockerfile
     container_name: ctf-detection
     restart: unless-stopped
     ports:
@@ -57,7 +57,8 @@ services:
     volumes:
       - ./traffic:/traffic:ro
       - ./contest-runtime/detection/suricata/log:/suricata:ro
-      - ./contest-runtime/config/services.json:/app/services.json:ro
+      - ./contest-runtime/config/services.json:/runtime/detection/service/services.json:ro
+    # CONFIG is explicit because the shared decoder package lives above service/.
     networks:
       - ctf-net
     depends_on:
@@ -92,8 +93,8 @@ services:
   # ============================================================
   dashboard:
     build:
-      context: ./contest-runtime/dashboard
-      dockerfile: Dockerfile
+      context: ./contest-runtime
+      dockerfile: dashboard/Dockerfile
     container_name: ctf-dashboard
     restart: unless-stopped
     ports:
@@ -103,6 +104,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - TULIP_API_URL=http://api:5000
+      - FLAGTRACE_API_URL=http://flagtrace:8095
       - CONFIG=/srv/services.json
       - RULES_PATH=/srv/rules/suricata.rules
       - MONITOR_IP=${MONITOR_IP}
@@ -121,6 +123,65 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+
+  # Flag-trace: ingest + read API (owns the schema) and the Phase 2 trace
+  # worker. One image, two entrypoints, one SQLite file. bringup.sh runs the
+  # `migrate` step with both stopped before starting them on a new schema.
+  flagtrace:
+    profiles: [flagtrace]
+    image: ctf-flagtrace:phase2
+    build:
+      context: ./contest-runtime
+      dockerfile: flagtrace/Dockerfile
+    container_name: ctf-flagtrace
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      - CONFIG=/runtime/config/services.json
+      - FLAGTRACE_DB=/data/flagtrace.sqlite3
+      - TRAFFIC_DIR=/traffic
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./traffic:/traffic:ro
+      - ./data/flagtrace:/data
+      - ./contest-runtime/config/services.json:/runtime/config/services.json:ro
+    networks:
+      - ctf-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8095/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  flagtrace-worker:
+    profiles: [flagtrace]
+    image: ctf-flagtrace:phase2
+    build:
+      context: ./contest-runtime
+      dockerfile: flagtrace/Dockerfile
+    container_name: ctf-flagtrace-worker
+    command: ["python", "-m", "flagtrace.app.main", "trace"]
+    restart: unless-stopped
+    # Long enough to finish or hand back the job in hand (lease_seconds).
+    stop_grace_period: 30s
+    environment:
+      - CONFIG=/runtime/config/services.json
+      - FLAGTRACE_DB=/data/flagtrace.sqlite3
+      - FLAGTRACE_WORKER_ID=ctf-flagtrace-worker
+    # Reads what ingest stored: no capture files, Docker socket or SSH.
+    volumes:
+      - ./data/flagtrace:/data
+      - ./contest-runtime/config/services.json:/runtime/config/services.json:ro
+    networks:
+      - ctf-net
+    healthcheck:
+      test: ["CMD", "python", "-m", "flagtrace.app.main", "worker-health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 networks:
   # Tulip's own compose network (project "tulip"). Joined only by the dashboard
