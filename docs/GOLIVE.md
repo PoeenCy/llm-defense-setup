@@ -1,10 +1,27 @@
 # GOLIVE.md — Chuyển từ luyện tập (mock-vulnbox) sang thi thật
 
 > Viết ban đầu trong lúc diễn tập (2026-10-10), cập nhật lại sau khi ctf_proxy thật đã deploy và
-> test thành công trên vulnbox thật (DFCD practice arena) — 2026-10-14. Đọc từ trên xuống, làm
-> theo đúng thứ tự. Đừng nhảy cóc.
+> test thành công trên vulnbox thật (DFCD practice arena) — 2026-10-14, cập nhật lại lần nữa sau
+> khi sửa và test thật cơ chế capture + honeytoken/OS-watchdog — 2026-10-16. Đọc từ trên xuống,
+> làm theo đúng thứ tự. Đừng nhảy cóc.
 >
 > Không có LLM/AI nào trong hệ thống này — mọi quyết định chặn là người tự đọc flow rồi bấm.
+
+## Đã test thật tới đâu (2026-10-16, DFCD practice arena, team-03) — đọc trước khi tin bất cứ dòng nào dưới đây
+
+| Thành phần | Trạng thái | Bằng chứng |
+|---|---|---|
+| Capture (tcpdump remote + pull về `traffic/`) | **Đã test live** | Chạy nhiều vòng rotate thật, pcap về đúng, không rò rỉ process/đĩa trên vulnbox |
+| ctf_proxy nhiều service + multi-condition rule + raw-TCP | **Đã test live** | Build → apply → APPLIED tab → delete, chu trình đầy đủ qua `dfcd-vbox` thật |
+| OS-watchdog (báo động + lọc nhiễu) | **Đã test live** | Alert thật đi qua cơ chế pull mới, lọc nhiễu xong vẫn bắt đúng 1 sự kiện thật (mysql query) |
+| Honeytoken — HTTP trap (port 7777) | **Đã test live** | Bấm trúng trap qua SSH, xác nhận log + Redis + dashboard khớp |
+| Honeytoken — file mồi + inotify | **Chưa test live** | Vulnbox DFCD không có cài `inotify-tools` → nhánh này chưa có cơ hội chạy thật, chỉ sửa đúng cấu trúc (không sudo-fail nữa) nhưng chưa thấy nó tự bắt một lần đọc file thật nào |
+| `monitor_host.ip` / hướng vulnbox→monitor | **Hạn chế hạ tầng đã xác nhận** | VPN practice arena này chỉ cho monitor→vulnbox, không cho ngược lại — đã có cơ chế pull bù, nhưng **chưa biết giải thật SVANM 2026 có khác không** |
+| Honeytoken đặt trên host (không phải trong container app) | **Hạn chế kiến trúc đã xác nhận, chưa sửa** | Flag thật nằm trong container `node` (`/flag`), file mồi hiện đặt trên host — kẻ tấn công khai thác app thật sẽ không chạm tới. Vẫn có giá trị nếu có container-escape |
+
+Tất cả trên đều là DFCD practice arena, **không phải giải SVANM 2026 thật**. Hạ tầng VPN/mạng của
+giải thật có thể khác — làm lại đúng mục "Xác minh `monitor_host.ip`" dưới đây ngay khi vào mạng
+thi thật, đừng giả định giống practice arena.
 
 ## Tổng quan sự khác biệt
 
@@ -25,7 +42,7 @@ code trừ câu 3 nếu rơi vào trường hợp hiếm.
 
 | # | Câu hỏi | Lệnh kiểm tra nhanh | Map vào field nào |
 |---|---|---|---|
-| 1 | Làm sao vào mạng thi? Đã connect chưa? | `ip addr`, `ping <scoreboard_ip>` | `monitor_host.ip` = IP mình thấy trên mạng đó |
+| 1 | Làm sao vào mạng thi? Đã connect chưa? | `ip addr`, `ping <scoreboard_ip>` | `monitor_host.ip` = IP mình thấy trên mạng đó — **đừng chỉ đoán, xem mục "Xác minh `monitor_host.ip`" ngay dưới đây trước khi qua Bước 1** |
 | 2 | Vulnbox của mình: máy riêng hay container share host? | `ssh <key> -p <port> <user>@<ip> hostname` | `vulnbox.ip`, `ssh_user`, `ssh_port` |
 | 3 | **Có chỗ nào chạy `tcpdump` với quyền root, thấy traffic thật không?** | xem bảng quyết định dưới | quyết định cách bắt gói tin (xem dưới) |
 | 4 | Flag format thật? | hỏi ban tổ chức / đọc rules | `flag.regex` |
@@ -64,6 +81,35 @@ Trước khi đổi config, cần có:
 - [ ] Danh sách **từng** service + port thật trên vulnbox (tên, port, http hay raw tcp hay udp,
       và tên service trong docker-compose của vulnbox đang bind port đó nếu biết — cần cho Phase 2)
 - [ ] IP của máy monitor này trên mạng thi (dùng lệnh `ip addr` hoặc hỏi ban tổ chức)
+
+### Xác minh `monitor_host.ip` — đừng chỉ đoán, test thật
+
+Lỗi thật đã gặp (2026-10-16, DFCD practice arena): `monitor_host.ip` bị gõ sai một lần, và dù
+`ssh` tới vulnbox vẫn chạy bình thường (hướng monitor→vulnbox không liên quan gì tới giá trị
+này), **honeytoken và OS-watchdog báo về bị mất hoàn toàn, âm thầm, không có lỗi gì hiện ra** —
+chỉ phát hiện được nhờ test tay. Lý do: SSH và các report push là 2 hướng kết nối khác nhau.
+
+**3 bước xác minh, làm đúng thứ tự trước khi deploy thật:**
+
+```bash
+# 1. IP thật của máy này trên mạng thi (KHÔNG suy luận, đọc trực tiếp)
+ip -4 addr show   # tìm interface của VPN/mạng thi, lấy đúng IP đó — không phải IP LAN/wifi
+
+# 2. Tự curl chính mình qua IP đó (sanity check: port 9999 nghe đúng chưa)
+curl -s -m 3 http://<IP vừa tìm được>:9999/health
+
+# 3. QUAN TRỌNG NHẤT — từ vulnbox, curl NGƯỢC LẠI về đúng IP/port đó (xem Bước 2
+#    ở dưới để có SSH alias trước). Đây là hướng thật honeytoken/OS-watchdog cần,
+#    khác hẳn hướng SSH monitor→vulnbox đã quen test:
+ssh <vulnbox_ssh_alias> "curl -s -m 5 http://<IP máy monitor>:9999/health"
+```
+
+Nếu bước 3 timeout (không phải "connection refused" — refused nghĩa là tới được nhưng không ai
+nghe, còn timeout nghĩa là không có đường đi): **mạng VPN của giải không cho chiều
+vulnbox→monitor**, không phải lỗi config. Gặp đúng trường hợp này ở DFCD practice arena — hệ
+thống đã có cơ chế dự phòng cho ca này (xem khung "Honeytoken/OS-watchdog không tới được
+monitor?" ở Bước 2), **không cần làm gì thêm**, chỉ cần biết để không hoang mang khi thấy cảnh
+báo "vulnbox can NOT reach..." lúc deploy.
 
 ### Bước 1 — Sửa `contest-runtime/config/services.json`
 
@@ -133,6 +179,17 @@ bash contest-runtime/watchdog/deploy-os-watchdog.sh
 
 Nếu script nào fail: đọc lỗi SSH trước (sai user/key/port là nguyên nhân phổ biến nhất),
 đừng đoán.
+
+**Honeytoken/OS-watchdog không tới được monitor? (dòng `[WARN] vulnbox can NOT reach...`)**
+Cả hai đều **tự chuyển sang kiểu hỏi-ngược** nếu không gửi được: `host_agent.py` (chạy sẵn trên
+máy monitor, trong `MODE=contest bash deploy-all.sh` ở Bước 3) tự SSH sang vulnbox mỗi 20 giây
+hỏi "có cảnh báo mới nào chưa báo được không", rồi đẩy vào dashboard giống như nhận được báo
+trực tiếp — **không cần làm gì thêm, tự chạy ngay sau khi 2 script trên deploy xong và
+`host_agent.py` đang sống**. Dòng `[WARN]` ở trên chỉ là cảnh báo "cách gửi trực tiếp không
+dùng được", không phải báo lỗi toàn bộ tính năng. Muốn chắc chắn đang hoạt động: xem
+`.host-agent.log` có dòng `os-watchdog alert pull every 20s` + `honeytoken alert pull every 20s`
+khi khởi động, hoặc `cat contest-runtime/.oswatchdog-pull-state.json` /
+`cat contest-runtime/.honeytoken-pull-state.json` thấy `last_id` tăng dần theo thời gian.
 
 ### Bước 3 — Bật hệ thống monitor
 
