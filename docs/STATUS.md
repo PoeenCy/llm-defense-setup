@@ -1622,3 +1622,50 @@ than guessed at here -- not something this session concluded one way or the othe
 
 Committed only the noise-filter change this round (the attribution question above is still
 open). `test_rulegen.py`/Flag-trace suite/`validate-config.sh` all still pass.
+
+(The mysql command flagged above was confirmed by the user to be a teammate's own setup work,
+not an incident -- no further action needed.)
+
+## 2026-10-16 — Honeytoken switched from push to poll, same fix as OS-watchdog
+
+User asked for the same push->poll treatment applied to honeytoken, now that OS-watchdog's
+version is confirmed working. Honeytoken has two independent event sources on the vulnbox, both
+already running unprivileged (no sudo, unlike OS-watchdog's root-owned systemd service):
+
+- the inotify file-access watcher in `deploy-honeytoken.sh` (dormant on this vulnbox --
+  inotify-tools isn't installed -- but fixed structurally regardless)
+- `flag-server.sh`'s HTTP trap on port 7777
+
+New `contest-runtime/detection/honeytoken-log.sh` (same append-only JSONL + monotonic-id +
+2000-line cap pattern as `os-watchdog-agent.sh`'s `alerts.jsonl`), but living in the plain ssh
+user's home (`~/.ctf-honeytoken/`) rather than a root-owned path -- since both callers already
+run unprivileged, the whole honeytoken pull path needed zero `sudo` on either end, simpler than
+OS-watchdog's. `deploy-honeytoken.sh` uploads it alongside the existing decoy files/trap process;
+the inotify loop now calls `~/honeytoken-log.sh log file-access "$path"` before its (still kept,
+still futile on this VPN) curl push. `flag-server.sh`'s Python was given an equivalent
+`log_local()` writing the same schema directly (no subprocess), and incidentally now also
+records the real caller's IP (`self.client_address[0]`) in the log, which the original push
+design never captured.
+
+New `contest-runtime/hostagent/honeytoken_pull.py`, a third daemon thread in `agent.py`
+alongside the OS-watchdog one, polling `~/honeytoken-log.sh since <id>` every 20s and writing
+each new entry into Redis's `alerts` list in the exact shape `detection_service.py`'s existing
+`/honeytoken` and `/honeytoken/{flag}` push handlers already produce.
+
+**Bug caught live before it shipped silently broken**: the first version's `alerts_since()`
+parser assumed no space after `"id":`, which holds for this script's own hand-written JSON but
+not for `flag-server.sh`'s Python `json.dumps()` output (`"id": 1` vs `"id":1`) -- every
+trap-hit line silently failed to parse and `since` returned nothing, with no error anywhere.
+Caught immediately by testing an actual trap hit end-to-end rather than trusting the dry
+implementation; fixed by stripping all whitespace from the extracted id before the numeric
+check, which parses either writer's output.
+
+**Verified live end-to-end** against `dfcd-vbox`: triggered the port-7777 trap twice via `curl`
+over ssh (can't reach it directly -- it binds `127.0.0.1` only, by design, matching the existing
+HTTP-trap behavior), confirmed both landed in `~/.ctf-honeytoken/alerts.jsonl` with the right
+schema, confirmed `since <id>` filtering is exact, restarted `host_agent.py` and confirmed
+`.honeytoken-pull-state.json`'s `last_id` matched the vulnbox's own latest id, confirmed via
+`/api/alerts` that both pulled alerts render with the same `type`/`message`/`src_ip`/`flag`
+shape a push would have produced. Re-ran `deploy-honeytoken.sh` again afterward and confirmed
+still exactly one `flag-server.sh` process (the leak fix from the earlier entry still holds).
+`test_rulegen.py` (16/16), Flag-trace suite (112/112), `validate-config.sh` all still pass.

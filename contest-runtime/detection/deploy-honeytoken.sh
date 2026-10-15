@@ -69,6 +69,15 @@ for p in $OLD_WATCHER_PIDS; do
     [[ "$p" =~ ^[0-9]+$ ]] && $SSH "$ALIAS" "kill -TERM $p" 2>/dev/null || true
 done
 
+# Same one-way-VPN problem as OS-watchdog (see docs/STATUS.md): the curl/
+# urlopen pushes below are kept as a fallback, but on this network the
+# vulnbox can't reach the monitor at all, so every honeytoken event is ALSO
+# logged locally (plain file in the ssh user's own home, no sudo needed --
+# both callers already run unprivileged) for honeytoken_pull.py on the
+# monitor to pick up over the direction that does work.
+$SSH "$ALIAS" "cat > ~/honeytoken-log.sh" < "${SCRIPT_DIR}/honeytoken-log.sh"
+$SSH "$ALIAS" "chmod +x ~/honeytoken-log.sh"
+
 $SSH "$ALIAS" "
 set -e
 MONITOR_URL='http://${MONITOR_IP}:${HONEYTOKEN_PORT}/honeytoken'
@@ -87,10 +96,11 @@ for path in /opt/flags/flag.txt /tmp/.secret/flag /root/.bash_history_backup /et
     if command -v inotifywait &>/dev/null; then
         (
             while true; do
-                sudo -n inotifywait -e access,open \"\$path\" 2>/dev/null && \
+                sudo -n inotifywait -e access,open \"\$path\" 2>/dev/null && { \
+                ~/honeytoken-log.sh log file-access \"\$path\" & \
                 curl -s -X POST \"\$MONITOR_URL\" \\
                      -H 'Content-Type: application/json' \\
-                     -d \"{\\\"path\\\":\\\"\$path\\\",\\\"flag\\\":\\\"\$HONEYTOKEN\\\"}\" &
+                     -d \"{\\\"path\\\":\\\"\$path\\\",\\\"flag\\\":\\\"\$HONEYTOKEN\\\"}\" & }
             done
         ) &
         echo \$! >> /tmp/.honeytoken-watchers.pid
@@ -104,15 +114,39 @@ done
 # Place a fake service response honeytoken (curl trap)
 sudo -n tee /usr/local/bin/flag-server.sh >/dev/null << 'FLAGEOF'
 #!/usr/bin/env python3
-import http.server, subprocess, urllib.request
+import http.server, json, os, time, urllib.request
 
 MONITOR='${MONITOR_IP}'
 PORT=${HONEYTOKEN_PORT}
 FLAG='${HONEYTOKEN_FLAG}'
 
+# Same local-log fallback as the inotify watcher (deploy-honeytoken.sh) and
+# os-watchdog-agent.sh -- this vulnbox's VPN only routes monitor->vulnbox,
+# so the urlopen push below reaches nowhere. honeytoken_pull.py on the
+# monitor polls this file instead, over the direction that does work.
+def log_local(kind, detail, src_ip):
+    try:
+        d = os.path.expanduser('~/.ctf-honeytoken')
+        os.makedirs(d, exist_ok=True)
+        seqf, logf = os.path.join(d, 'seq'), os.path.join(d, 'alerts.jsonl')
+        try:
+            seq = int(open(seqf).read().strip() or '0') + 1
+        except Exception:
+            seq = 1
+        open(seqf, 'w').write(str(seq))
+        entry = {'id': seq, 'ts': int(time.time()), 'kind': kind, 'detail': detail, 'src_ip': src_ip}
+        with open(logf, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+        lines = open(logf).readlines()
+        if len(lines) > 2000:
+            open(logf, 'w').writelines(lines[-2000:])
+    except Exception:
+        pass
+
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        # Alert monitor
+        log_local('trap-hit', FLAG, self.client_address[0])
+        # Also attempt the direct push, in case a different network allows it
         try:
             req = urllib.request.Request(
                 f'http://{MONITOR}:{PORT}/honeytoken/{FLAG}',

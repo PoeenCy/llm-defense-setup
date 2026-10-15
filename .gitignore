@@ -17,6 +17,7 @@ traffic/.incoming/
 data/flagtrace/
 contest-runtime/monitor/.capture-session.json
 contest-runtime/.oswatchdog-pull-state.json
+contest-runtime/.honeytoken-pull-state.json
 contest-runtime/flagtrace/transport/flagtrace-transport
 contest-runtime/detection/suricata/log/
 contest-runtime/detection/suricata/etc/
