@@ -16,12 +16,20 @@ with open(CONFIG_PATH) as f:
     cfg = json.load(f)
 
 flag_regex   = cfg["flag"]["regex"]
-vulnbox_ip   = cfg["vulnbox"]["ip"]
-vulnbox_port = cfg["vulnbox"]["pcap_broker_port"]
+vulnboxes    = cfg["vulnboxes"]  # one or more hosts, each with its own services[]
+# Tulip's .env has a single informational VM_IP field (shown in its UI, not
+# used to filter traffic -- BPF + directory-watch do that). With multiple
+# hosts there's no one "the" vulnbox IP; the first host stands in for it.
+vulnbox_ip   = vulnboxes[0]["ip"]
+vulnbox_port = vulnboxes[0]["pcap_broker_port"]
 team_id      = cfg["team_id"]
 bind_ip      = cfg.get("monitor_host", {}).get("bind_ip", "127.0.0.1")
 mock_vulnbox_enabled = cfg.get("mock_vulnbox", {}).get("enabled", False)
-live_pcap_broker = cfg.get("vulnbox", {}).get("live_pcap_broker", False)
+# Live PCAP-over-IP brokers aren't supported per-host yet -- only the
+# pull-based directory-watch capture (capture_pull.py) handles multiple
+# hosts. Force this off for a multi-host config rather than silently using
+# just the first host's broker setting.
+live_pcap_broker = vulnboxes[0].get("live_pcap_broker", False) if len(vulnboxes) == 1 else False
 traffic_dir  = os.path.join(REPO_ROOT, "traffic")
 suricata_dir = os.path.join(REPO_ROOT, "contest-runtime", "detection", "suricata")
 
@@ -30,12 +38,16 @@ os.makedirs(os.path.join(suricata_dir, "log"), exist_ok=True)
 os.makedirs(os.path.join(suricata_dir, "etc"), exist_ok=True)
 os.makedirs(os.path.join(suricata_dir, "lib"), exist_ok=True)
 
-# Build BPF filter from services
+# Build BPF filter from every host's services, combined. Tulip's assembler
+# reads whatever lands in traffic/ regardless of which host it came from
+# (capture_pull.py prefixes pcap filenames by session, not by host, so this
+# BPF only needs to be permissive enough to match every service across every
+# host -- it doesn't need to be host-aware).
 # capture_port, if set, is the port actually visible at the capture point
 # (e.g. a docker bridge sees the post-NAT internal port, not the public
 # listen port) — falls back to "port" for a traditional vulnbox with no NAT
 # between the capture point and the service.
-service_ports = [str(s.get("capture_port", s["port"])) for s in cfg["services"]]
+service_ports = sorted({str(s.get("capture_port", s["port"])) for vb in vulnboxes for s in vb.get("services", [])})
 bpf = " or ".join(f"port {p}" for p in service_ports) if service_ports else ""
 
 # Generate tick start as now (will be overridden at match start)

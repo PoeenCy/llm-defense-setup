@@ -81,22 +81,52 @@ if found and cidr:
     except ValueError:
         fail(f"teams_cidr is not valid CIDR: {cidr}")
 
-# ---- vulnbox ----
-for dotted in ["vulnbox.ip", "vulnbox.ssh_user", "vulnbox.capture_iface", "vulnbox.pcap_broker_port"]:
-    keys = dotted.split(".")
-    v, found = get(d, *keys)
-    if not found or v is None or v == "":
-        fail(f"Missing required field: {dotted}")
-    else:
-        ok(f"{dotted} = {v}")
-
-ip, found = get(d, "vulnbox", "ip")
-if found and ip:
-    try:
-        ipaddress.ip_address(ip)
-        ok(f"vulnbox.ip is valid IPv4: {ip}")
-    except ValueError:
-        fail(f"vulnbox.ip is not a valid IP: {ip}")
+# ---- vulnboxes (one or more hosts; each carries its own services[]) ----
+vulnboxes, vfound = get(d, "vulnboxes")
+if not vfound or not isinstance(vulnboxes, list) or len(vulnboxes) == 0:
+    fail("vulnboxes array is missing or empty — at least one host required")
+else:
+    ok(f"vulnboxes: {len(vulnboxes)} host(s) defined")
+    seen_names = set()
+    valid_protos = {"tcp", "udp"}
+    valid_layers = {"l7-http", "l7-https", "l4-raw", "l4-udp"}
+    for vi, vb in enumerate(vulnboxes):
+        for req in ["name", "ip", "ssh_user", "capture_iface", "pcap_broker_port", "capture_ssh_alias"]:
+            if req not in vb or vb[req] is None or vb[req] == "":
+                fail(f"vulnboxes[{vi}] missing required field: {req}")
+            else:
+                ok(f"vulnboxes[{vi}].{req} = {vb[req]}")
+        name = vb.get("name")
+        if name:
+            if name in seen_names:
+                fail(f"vulnboxes[{vi}].name is a duplicate: {name!r} — every host needs a unique name")
+            seen_names.add(name)
+        ip = vb.get("ip")
+        if ip:
+            try:
+                ipaddress.ip_address(ip)
+                ok(f"vulnboxes[{vi}].ip is valid IPv4: {ip}")
+            except ValueError:
+                fail(f"vulnboxes[{vi}].ip is not a valid IP: {ip}")
+        # ---- this host's own services[] (may be empty while still being reconnoitered) ----
+        svcs = vb.get("services")
+        if not isinstance(svcs, list):
+            fail(f"vulnboxes[{vi}].services must be a list (use [] if not known yet)")
+            svcs = []
+        elif len(svcs) == 0:
+            warn(f"vulnboxes[{vi}] ({name}): services[] is empty — capture/ctf_proxy have nothing to do here yet")
+        else:
+            ok(f"vulnboxes[{vi}] ({name}): {len(svcs)} service(s) defined")
+        for si, svc in enumerate(svcs):
+            for req in ["name", "port", "proto", "layer"]:
+                if req not in svc or svc[req] is None or svc[req] == "":
+                    fail(f"vulnboxes[{vi}].services[{si}] missing required field: {req}")
+                else:
+                    ok(f"vulnboxes[{vi}].services[{si}].{req} = {svc[req]}")
+            if "proto" in svc and svc["proto"] not in valid_protos:
+                fail(f"vulnboxes[{vi}].services[{si}].proto must be tcp|udp, got: {svc['proto']}")
+            if "layer" in svc and svc["layer"] not in valid_layers:
+                warn(f"vulnboxes[{vi}].services[{si}].layer unknown value: {svc['layer']} (known: {valid_layers})")
 
 # ---- monitor_host ----
 for dotted in ["monitor_host.ip", "monitor_host.dashboard_port",
@@ -171,25 +201,6 @@ else:
     if v:
         warn("ml_classifier.enabled=true — has NO EFFECT in MODE=contest; only ever starts "
              "under MODE=prep, and only with BTC's written sign-off. See services.json's own note.")
-
-# ---- services array ----
-services, sfound = get(d, "services")
-if not sfound or not isinstance(services, list) or len(services) == 0:
-    fail("services array is missing or empty — at least one service required")
-else:
-    ok(f"services: {len(services)} service(s) defined")
-    valid_protos = {"tcp", "udp"}
-    valid_layers = {"l7-http", "l7-https", "l4-raw", "l4-udp"}
-    for i, svc in enumerate(services):
-        for req in ["name", "port", "proto", "layer"]:
-            if req not in svc or svc[req] is None or svc[req] == "":
-                fail(f"services[{i}] missing required field: {req}")
-            else:
-                ok(f"services[{i}].{req} = {svc[req]}")
-        if "proto" in svc and svc["proto"] not in valid_protos:
-            fail(f"services[{i}].proto must be tcp|udp, got: {svc['proto']}")
-        if "layer" in svc and svc["layer"] not in valid_layers:
-            warn(f"services[{i}].layer unknown value: {svc['layer']} (known: {valid_layers})")
 
 # ---- keyword sync: ctf_proxy's generated config.json must byte-match services.json ----
 ctf_proxy_cfg_path = os.path.join(

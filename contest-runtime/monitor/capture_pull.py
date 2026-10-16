@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Session-owned tcpdump + closed-file shipping. No age heuristic or broad kill."""
+"""Session-owned tcpdump + closed-file shipping, one independent session per
+vulnbox host (contest-runtime/config/services.json's vulnboxes[]). No age
+heuristic or broad kill.
+
+Multi-host: a host is only captured if its own services[] is non-empty --
+an entry with no services configured yet is skipped (nothing to filter
+for), not an error. Each host's remote session is fully independent: one
+host's SSH being down, disk-full, or otherwise degraded never stops the
+others from being pulled. All hosts ship into the SAME local traffic/
+directory; filenames are already prefixed by a per-session uuid (unique
+per host's session, never reused), so nothing from two hosts can collide.
+"""
 import argparse
 import fcntl
 import hashlib
@@ -40,8 +51,20 @@ def atomic_json(path, value):
         os.close(fd)
 
 
-def load_state():
-    return json.loads(STATE.read_text()) if STATE.exists() else None
+def load_states() -> dict:
+    """{host_name: {session, alias, remote_dir}, ...}. Also accepts the old
+    single-session shape (pre-multi-host) so an upgrade doesn't orphan a
+    session still running on a vulnbox -- treated as one host named "_legacy"."""
+    if not STATE.exists():
+        return {}
+    raw = json.loads(STATE.read_text())
+    if "session" in raw and "alias" in raw:  # old single-host shape
+        return {"_legacy": raw}
+    return raw
+
+
+def save_states(states: dict):
+    atomic_json(STATE, states)
 
 
 def remote_status(state):
@@ -100,35 +123,37 @@ def pull_once(state, cfg):
             cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "--", state["alias"],
                    "cat -- " + shlex.quote(state["remote_dir"] + "/done/" + name)]
             subprocess.run(cmd, stdout=f, check=True, timeout=120)
-        publish_file(temp, dest, {"session": state["session"], "source": cfg.get("flagtrace", {}).get("capture_source", "vulnbox")})
+        publish_file(temp, dest, {"session": state["session"], "host": state.get("host", "?"),
+                                   "source": cfg.get("flagtrace", {}).get("capture_source", "vulnbox")})
         # done/ is created by runner.sh under sudo, so it's root-owned; a
         # plain rm from this unprivileged ssh user can't unlink inside it
         # (confirmed live: every pull left the remote file behind forever).
         ssh(state["alias"], "sudo -n rm -- " + shlex.quote(state["remote_dir"] + "/done/" + name))
 
 
-def start(cfg):
-    previous = load_state()
+def start_host(cfg, vb, previous=None):
+    """Start (or resume, if already running) one host's capture session.
+    Raises on failure -- caller decides whether that stops just this host
+    or the whole run."""
     if previous:
         if remote_status(previous) == "RUNNING":
             return previous
         pull_once(previous, cfg)  # drain closed final files before a new session
-    v = cfg["vulnbox"]
-    alias = v["capture_ssh_alias"]
+    alias = vb["capture_ssh_alias"]
     ssh(alias, "sudo -n true")
-    iface = v.get("docker_bridge") or v.get("capture_iface", "auto")
+    iface = vb.get("docker_bridge") or vb.get("capture_iface", "auto")
     if iface == "auto":
         iface = ssh(alias, "ip route show default | awk '/default/ {print $5; exit}'").decode().strip()
     if not iface:
-        raise ValueError("capture interface could not be determined")
+        raise ValueError(f"[{vb['name']}] capture interface could not be determined")
     opts = cfg.get("capture", {})
     rotation = int(opts.get("rotate_seconds", 30))
     max_kb = int(opts.get("remote_max_mb", 512)) * 1024
     if rotation < 1 or max_kb < 1024:
         raise ValueError("invalid capture limits")
-    ports = sorted({int(s.get("capture_port", s["port"])) for s in cfg["services"]})
+    ports = sorted({int(s.get("capture_port", s["port"])) for s in vb.get("services", [])})
     if not ports or any(p < 1 or p > 65535 for p in ports):
-        raise ValueError("invalid capture ports")
+        raise ValueError(f"[{vb['name']}] invalid or empty capture ports")
     bpf = " or ".join(f"port {p}" for p in ports)
     session = uuid.uuid4().hex
     directory = "/tmp/ctf-capture-" + session
@@ -138,12 +163,29 @@ def start(cfg):
     command = "nohup sudo -n bash " + shlex.quote(directory + "/runner.sh") + " " + shlex.join(args)
     command += " </dev/null >" + shlex.quote(directory + "/capture.log") + " 2>&1 &"
     ssh(alias, command)
-    state = {"session": session, "alias": alias, "remote_dir": directory}
-    atomic_json(STATE, state)
+    state = {"session": session, "alias": alias, "remote_dir": directory, "host": vb["name"]}
     time.sleep(1)
     if remote_status(state) != "RUNNING":
-        raise RuntimeError("capture failed to start; inspect " + directory + "/capture.log")
+        raise RuntimeError(f"[{vb['name']}] capture failed to start; inspect {directory}/capture.log")
     return state
+
+
+def start_all(cfg) -> dict:
+    """Best-effort across every host with services configured: one host
+    failing to start (bad SSH, no services yet, etc.) is logged and does
+    NOT stop the others."""
+    previous = load_states()
+    states = {}
+    for vb in cfg["vulnboxes"]:
+        if not vb.get("services"):
+            continue  # nothing to filter for yet -- not an error
+        name = vb["name"]
+        try:
+            states[name] = start_host(cfg, vb, previous.get(name))
+        except Exception as exc:
+            print(f"[{name}] capture start failed: {exc!r}", flush=True)
+    save_states(states)
+    return states
 
 
 def loop(cfg):
@@ -155,7 +197,7 @@ def loop(cfg):
         except BlockingIOError:
             print("Capture loop already running", flush=True)
             return
-        state = start(cfg)
+        states = start_all(cfg)
         PID.write_text(str(os.getpid()))
         stopping = False
         def signal_stop(*_):
@@ -164,25 +206,30 @@ def loop(cfg):
         signal.signal(signal.SIGTERM, signal_stop)
         signal.signal(signal.SIGINT, signal_stop)
         try:
-            while not stopping:
-                try:
-                    pull_once(state, cfg)
-                    if remote_status(state) == "STOPPED":
+            while not stopping and states:
+                for name in list(states):
+                    state = states[name]
+                    try:
                         pull_once(state, cfg)
-                        print("Capture stopped remotely (quota or exit); files preserved", flush=True)
-                        break
-                except Exception as exc:
-                    print(f"Capture pull degraded: {exc}", flush=True)
+                        if remote_status(state) == "STOPPED":
+                            pull_once(state, cfg)
+                            print(f"[{name}] capture stopped remotely (quota or exit); files preserved", flush=True)
+                            del states[name]
+                            save_states(states)
+                    except Exception as exc:
+                        print(f"[{name}] capture pull degraded: {exc!r}", flush=True)
                 for _ in range(int(cfg.get("capture", {}).get("pull_seconds", 5))):
                     if stopping:
                         break
                     time.sleep(1)
         finally:
-            try:
-                stop_remote(state)
-                pull_once(state, cfg)
-            finally:
-                PID.unlink(missing_ok=True)
+            for name, state in states.items():
+                try:
+                    stop_remote(state)
+                    pull_once(state, cfg)
+                except Exception as exc:
+                    print(f"[{name}] shutdown drain failed: {exc!r}", flush=True)
+            PID.unlink(missing_ok=True)
 
 
 def main():
@@ -193,8 +240,11 @@ def main():
     args = p.parse_args()
     cfg = json.loads((HERE.parent / "config/services.json").read_text())
     if args.status:
-        state = load_state()
-        print(remote_status(state) if state else "STOPPED")
+        states = load_states()
+        if not states:
+            print("STOPPED")
+        for name, state in states.items():
+            print(f"{name}: {remote_status(state)}")
     elif args.stop:
         if PID.exists():
             pid = int(PID.read_text())
@@ -205,10 +255,13 @@ def main():
                     if not PID.exists():
                         return
                     time.sleep(1)
-        state = load_state()
-        if state:
-            stop_remote(state)
-            pull_once(state, cfg)
+        states = load_states()
+        for name, state in states.items():
+            try:
+                stop_remote(state)
+                pull_once(state, cfg)
+            except Exception as exc:
+                print(f"[{name}] stop failed: {exc!r}", flush=True)
     elif args.background:
         if PID.exists():
             try:

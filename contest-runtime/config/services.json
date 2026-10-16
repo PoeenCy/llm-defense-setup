@@ -1,37 +1,102 @@
 {
   "_comment": "SINGLE SOURCE OF TRUTH — edit only this file. All components read from it.",
-  "team_id": "team-03",
-  "vulnbox": {
-    "ip": "10.13.2.10",
-    "ssh_user": "root",
-    "ssh_port": 2203,
-    "capture_iface": "auto",
-    "pcap_broker_port": 4242,
-    "capture_ssh_alias": "dfcd-vbox",
-    "docker_bridge": null,
-    "note": "ssh_user/ssh_port = team patch key, only reaches this team's public-proxy container (no tcpdump there). capture_ssh_alias = admin SSH (via ~/.ssh/config, ProxyJump to gameserver) used by deploy-capture-pull.sh to tcpdump on the docker HOST. capture_iface (default \"eth0\"/auto) is the EXTERNAL interface, captured pre-NAT so each service's public port (services[].port) is what both tcpdump's BPF and Tulip see directly -- no docker_bridge / capture_port NAT workaround needed. Set docker_bridge only if eth0 genuinely is not where the public IP lives (rare; auto mode tries ip route first)."
-  },
+  "team_id": "team18-cscv",
+  "vulnboxes": [
+    {
+      "name": "edge-proxy",
+      "ip": "172.16.118.102",
+      "ssh_user": "root",
+      "ssh_port": 22,
+      "capture_iface": "auto",
+      "pcap_broker_port": 4242,
+      "capture_ssh_alias": "cscv-edge-proxy",
+      "docker_bridge": null,
+      "services": [],
+      "note": "PLACEHOLDER host entry, generated from the organizer's credential sheet (SSH admin access only -- it does not list the actual challenge ports). Fill in services[] once you've SSH'd in and found what's actually listening (ss -tlnp / docker ps). capture_ssh_alias is an alias you create in ~/.ssh/config (key-based, NOT the root password from the credential sheet -- see docs/GOLIVE.md multi-host section)."
+    },
+    {
+      "name": "gitea",
+      "ip": "172.16.118.103",
+      "ssh_user": "root",
+      "ssh_port": 22,
+      "capture_iface": "auto",
+      "pcap_broker_port": 4242,
+      "capture_ssh_alias": "cscv-gitea",
+      "docker_bridge": null,
+      "services": [],
+      "note": "PLACEHOLDER -- same as edge-proxy. Likely fronts a Gitea instance; fill in services[] once confirmed."
+    },
+    {
+      "name": "ci-runner",
+      "ip": "172.16.118.104",
+      "ssh_user": "root",
+      "ssh_port": 22,
+      "capture_iface": "auto",
+      "pcap_broker_port": 4242,
+      "capture_ssh_alias": "cscv-ci-runner",
+      "docker_bridge": null,
+      "services": [],
+      "note": "PLACEHOLDER -- same as edge-proxy."
+    },
+    {
+      "name": "jenkins",
+      "ip": "172.16.118.105",
+      "ssh_user": "root",
+      "ssh_port": 22,
+      "capture_iface": "auto",
+      "pcap_broker_port": 4242,
+      "capture_ssh_alias": "cscv-jenkins",
+      "docker_bridge": null,
+      "services": [],
+      "note": "PLACEHOLDER -- same as edge-proxy. Likely fronts a Jenkins instance; fill in services[] once confirmed."
+    },
+    {
+      "name": "dns-ops",
+      "ip": "172.16.118.109",
+      "ssh_user": "root",
+      "ssh_port": 22,
+      "capture_iface": "auto",
+      "pcap_broker_port": 4242,
+      "capture_ssh_alias": "cscv-dns-ops",
+      "docker_bridge": null,
+      "services": [],
+      "note": "PLACEHOLDER -- same as edge-proxy. Likely a DNS service -- if so its challenge port is probably udp/53, not tcp; ctf_proxy can't front UDP (see CONFIG.md's content-based iptables fallback)."
+    },
+    {
+      "name": "web-app",
+      "ip": "172.16.118.111",
+      "ssh_user": "root",
+      "ssh_port": 22,
+      "capture_iface": "auto",
+      "pcap_broker_port": 4242,
+      "capture_ssh_alias": "cscv-web-app",
+      "docker_bridge": null,
+      "services": [],
+      "note": "PLACEHOLDER -- same as edge-proxy."
+    }
+  ],
   "monitor_host": {
-    "ip": "10.13.9.34",
+    "ip": "CHANGE_ME",
     "dashboard_port": 8080,
     "alert_queue_port": 6380,
-    "bind_ip": "192.168.1.202",
-    "bind_ip_note": "Address the Dashboard (8080) and Tulip web UI (3000) listen on. 127.0.0.1 = only this machine (safe default). Set to a LAN IP to let teammates on a trusted network open them (2026-10-16: changed to 192.168.1.202, this machine's home-wifi/LAN address -- verify with `ip -4 addr show` if this box's network changes). Redis (6380), the detection admin/test API (9998), and Tulip's Postgres (5433) are now ALWAYS loopback-only regardless of this value -- all three are unauthenticated, so they no longer follow bind_ip (fixed 2026-10-16; previously they did, which meant the documented 'open the dashboard to teammates' step also handed out the alert queue, test/inject-flag endpoints, and the raw flow database to the whole LAN). The honeytoken port always listens on all interfaces by design."
+    "bind_ip": "127.0.0.1",
+    "bind_ip_note": "Address the Dashboard (8080) and Tulip web UI (3000) listen on. 127.0.0.1 = only this machine (safe default). Set to a LAN IP to let teammates on a trusted network open them. Redis (6380), the detection admin/test API (9998), and Tulip's Postgres (5433) are ALWAYS loopback-only regardless of this value -- all three are unauthenticated, so they never follow bind_ip. The honeytoken port always listens on all interfaces by design.",
+    "note": "CHANGE_ME: this machine's address on the SoftEther VPN once connected (verify with `ip -4 addr show` on the VPN's virtual NIC -- NOT the home-LAN/wifi address). Needed for honeytoken/OS-watchdog push (pull fallback works regardless, see docs/RUNBOOK.md's one-way-routing section)."
   },
   "flag": {
-    "regex": "[A-Z0-9]{31}=",
-    "submit_url": "http://10.13.1.10:8080/flags",
-    "note": "PUT with header X-Team-Token: <team token, kept OUT of this file — see team-tokens.txt locally>"
+    "regex": "CHANGE_ME",
+    "submit_url": "CHANGE_ME",
+    "note": "CSCV2026 rCTF scoreboard -- flag format and submit endpoint not in the credential sheet (it only has the team token, used to log into rCTF's own web UI, not a flag-submit API like ForcAD's). Check the rCTF scoreboard UI itself once reachable; rCTF typically wants you to submit flags through its own web page rather than a PUT-with-header API -- confirm before assuming the old ForcAD-style submit_url flow applies here at all."
   },
-  "teams_cidr": "10.13.2.0/24",
+  "teams_cidr": "CHANGE_ME",
   "gameserver_hint": {
-    "ip": "10.13.1.10",
-    "note": "ForcAD scoreboard; PUT /flags with X-Team-Token header to submit"
+    "ip": "CHANGE_ME",
+    "note": "rCTF scoreboard (not ForcAD -- different platform, different submit flow, see flag.note above). Team token for logging into it is in the organizer's credential sheet, kept OUT of this file."
   },
   "honeytoken": {
     "flag": "HONEYTOKEN000000000000000000000=",
     "endpoint_port": 9999,
-    "note": "a fake flag placed in a trap file on the vulnbox; if seen outbound it means compromise"
+    "note": "a fake flag placed in a trap file on a vulnbox; if seen outbound it means compromise. Format should match flag.regex once that's filled in -- update this value to match."
   },
   "tulip": {
     "web_port": 3000,
@@ -41,7 +106,7 @@
   "mock_vulnbox": {
     "enabled": false,
     "hostname": "mock-vulnbox",
-    "note": "false = real vulnbox (DFCD practice arena, team-01). bringup.sh skips the toy app + ctf_proxy when false."
+    "note": "false = real vulnboxes (see vulnboxes[] above). bringup.sh skips the toy app + ctf_proxy when false."
   },
   "ctf_proxy": {
     "keyword": "CTFMONITOR_BLOCKED",
@@ -56,35 +121,17 @@
       "duration": 60,
       "interval": 2
     },
-    "note": "keyword MUST stay the single source other tools read from — do not hardcode elsewhere",
-    "insertion": {
-      "mode": "docker-compose",
-      "remote_compose_file": "~/practice-setup/team-03/docker-compose.yml",
-      "remote_compose_service": "public-proxy",
-      "remote_network_name": "team-03_proxy-public",
-      "remote_ssh_alias": "dfcd-vbox"
-    }
+    "note": "Global ctf_proxy settings, shared across every vulnbox entry's own independent ctf_proxy deployment -- keyword MUST stay the single source other tools read from, do not hardcode elsewhere. Per-host insertion details (which compose file/service/network on THAT host) now live on each vulnboxes[] entry's own ctf_proxy_insertion, not here."
   },
   "ml_classifier": {
     "enabled": false,
     "note": "Do NOT enable during contest unless BTC has confirmed in writing; encoder/clustering classifier only, never generative. This flag has NO EFFECT when MODE=contest regardless of its value — bringup.sh never passes docker-compose.prep.yml (where ml-fingerprint lives) in contest mode, full stop. Only meaningful when MODE=prep."
   },
-  "services": [
-    {
-      "name": "web",
-      "port": 8003,
-      "proto": "tcp",
-      "layer": "l7-http",
-      "compose_service": "public-proxy",
-      "description": "team-03 public-proxy -> DFCD app stack (php/ws/mathsays)",
-      "note": "team-03 public-proxy -> DFCD app stack (php/ws/mathsays). Capture is now on the external interface (pre-NAT), so port 8003 (the public port) is what both tcpdump and Tulip see directly -- no capture_port override needed. compose_service = the docker-compose service name on the vulnbox backing this port, used by deploy-ctfproxy.sh/hostagent to insert ctf_proxy per-service (falls back to ctf_proxy.insertion.remote_compose_service when a service entry omits this, for single-service configs written before this field existed)."
-    }
-  ],
   "retention": {
     "pcap_keep_minutes": 0,
     "pcap_max_gb": 5,
     "min_free_gb": 10,
     "tulip_flow_retention_hours": 0,
-    "note": "host_agent deletes captured pcaps in traffic/ (oldest first) only when needed: traffic/ grows past pcap_max_gb, or the disk has less than min_free_gb free. pcap_keep_minutes > 0 additionally deletes anything older than that (0 = off). Files younger than 10 min are never touched. Flows already imported stay in Tulip. On the vulnbox, pcaps are removed as soon as they are pulled. If min_free_gb is still violated after pcap cleanup, host_agent next prunes Docker's own dangling images/build-cache (always safe -- see contest-runtime/hostagent/retention.py). tulip_flow_retention_hours is a LAST-RESORT, opt-in-only escalation beyond that: 0 (default) = never touch Tulip's own flow data; set to e.g. 8 to let host_agent drop TimescaleDB chunks older than that many hours if disk is still critically low after everything else -- this deletes real captured contest flows, so leave it 0 unless you understand that tradeoff."
+    "note": "host_agent deletes captured pcaps in traffic/ (oldest first) only when needed: traffic/ grows past pcap_max_gb, or the disk has less than min_free_gb free. pcap_keep_minutes > 0 additionally deletes anything older than that (0 = off). Files younger than 10 min are never touched. Flows already imported stay in Tulip. On each vulnbox, pcaps are removed as soon as they are pulled. If min_free_gb is still violated after pcap cleanup, host_agent next prunes Docker's own dangling images/build-cache (always safe -- see contest-runtime/hostagent/retention.py). tulip_flow_retention_hours is a LAST-RESORT, opt-in-only escalation beyond that: 0 (default) = never touch Tulip's own flow data; set to e.g. 8 to let host_agent drop TimescaleDB chunks older than that many hours if disk is still critically low after everything else -- this deletes real captured contest flows, so leave it 0 unless you understand that tradeoff."
   }
 }
